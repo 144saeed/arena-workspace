@@ -6,5 +6,31 @@
   },
   "newProjectRoot": "projects",
   "projects": {
+    "arena-core": {
+      "projectType": "library",
+      "root": "projects/arena-core",
+      "sourceRoot": "projects/arena-core/src",
+      "prefix": "lib",
+      "architect": {
+        "build": {
+          "builder": "@angular/build:ng-packagr",
+          "configurations": {
+            "production": {
+              "tsConfig": "projects/arena-core/tsconfig.lib.prod.json"
+            },
+            "development": {
+              "tsConfig": "projects/arena-core/tsconfig.lib.json"
+            }
+          },
+          "defaultConfiguration": "production"
+        },
+        "test": {
+          "builder": "@angular/build:unit-test",
+          "options": {
+            "tsConfig": "projects/arena-core/tsconfig.spec.json"
+          }
+        }
+      }
+    }
   }
 }
