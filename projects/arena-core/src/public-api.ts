@@ -22,6 +22,8 @@ export * from './lib/database/base-repository.class';
 // 4. AI Gateway & Contracts
 export * from './lib/ai/ai-gateway.service';
 export * from './lib/ai/adapters/google-gemini.adapter';
+export * from './lib/ai/agent/ai-tool-registry.service';
+export * from './lib/ai/agent/agent-executor.service';
 export * from './lib/contracts/interfaces/ai-adapter.interface';
 export * from './lib/contracts/dtos/ai-request.dto';
 export * from './lib/contracts/dtos/ai-response.dto';
