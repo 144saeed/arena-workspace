@@ -41,7 +41,14 @@ export class SchemaManagerService {
       combinedSchema[schema.tableName] = schema.schemaDefinition;
     });
 
-    const currentSchemaString = JSON.stringify(combinedSchema);
+    // Sort keys alphabetically to guarantee deterministic JSON.stringify output
+    const sortedKeys = Object.keys(combinedSchema).sort();
+    const sortedSchema: Record<string, string> = {};
+    sortedKeys.forEach(key => {
+      sortedSchema[key] = combinedSchema[key];
+    });
+
+    const currentSchemaString = JSON.stringify(sortedSchema);
     const metaRecord = await this.metaDb.metaStore.get(1);
 
     let currentVersion = metaRecord?.version || 1;
@@ -60,7 +67,7 @@ export class SchemaManagerService {
 
     return {
       version: currentVersion,
-      dexieSchema: combinedSchema
+      dexieSchema: sortedSchema
     };
   }
 }

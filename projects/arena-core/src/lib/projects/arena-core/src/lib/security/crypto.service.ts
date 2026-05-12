@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 
 /**
  * The Cryptographic Engine of the OS.
- * Implements AES-256-GCM for encryption and PBKDF2 for key derivation.
+ * Implements AES-256-GCM for encryption and PBKDF2 for key derivation AND hashing.
  * Operates purely on the browser's native Web Crypto API.
  */
 @Injectable({
@@ -20,8 +20,27 @@ export class CryptoService {
 
   async hashPassword(password: string, saltHex: string): Promise<string> {
     const encoder = new TextEncoder();
-    const data = encoder.encode(password + saltHex);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(password),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits']
+    );
+
+    const saltBuffer = this.hexToBuffer(saltHex);
+
+    const hashBuffer = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: saltBuffer,
+        iterations: this.ITERATIONS,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      256
+    );
+
     return this.bufferToHex(hashBuffer);
   }
 

@@ -1,0 +1,1001 @@
+﻿Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\ai\ai-gateway.service.ts
+import { Injectable } from '@angular/core';
+import { Observable, from, switchMap, finalize } from 'rxjs';
+import { AiRequestDto } from '../contracts/dtos/ai-request.dto';
+import { AiResponseDto } from '../contracts/dtos/ai-response.dto';
+import { AiRegistryService } from './ai-registry.service';
+import { SecurityService } from '../security/security.service';
+import { AiProfileRepository } from '../database/repositories/ai-profile-repository.repository';
+import { CryptoService } from '../security/crypto.service';
+
+/**
+ * The Central Communication Hub for all AI operations.
+ * Fetches the active profile, decrypts the API key securely into RAM, 
+ * routes the request via the Factory, and ensures memory scrubbing post-execution.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class AiGatewayService {
+
+  constructor(
+    private readonly aiRegistry: AiRegistryService,
+    private readonly securityService: SecurityService,
+    private readonly profileRepo: AiProfileRepository,
+    private readonly cryptoService: CryptoService
+  ) { }
+
+  /**
+   * Dispatches a request to the currently active AI provider using RxJS.
+   */
+  dispatch(request: AiRequestDto): Observable<AiResponseDto> {
+    // We use RxJS 'from' to convert the Promise-based DB and Crypto calls into an Observable stream
+    return from(this.prepareSecureContext()).pipe(
+      switchMap(({ adapter, decryptedKey, model }) => {
+
+        // Inject the default model if the request didn't specify one
+        const finalRequest: AiRequestDto = {
+          ...request,
+          model: request.model || model
+        };
+
+        // Execute the AI call
+        return adapter.generateResponse(finalRequest, decryptedKey).pipe(
+          // Memory Scrubbing: Dereference the decrypted key immediately after the stream completes or errors
+          finalize(() => {
+            decryptedKey = '';
+          })
+        );
+      })
+    );
+  }
+
+  private async prepareSecureContext() {
+    const activeProfile = await this.profileRepo.getActiveProfile();
+    if (!activeProfile) {
+      throw new Error('[AI Gateway] Cannot dispatch request: No active AI profile found.');
+    }
+
+    const masterKey = this.securityService.getSessionKey();
+
+    // Decrypt the API key into a local variable (RAM only)
+    const decryptedKey = await this.cryptoService.decrypt(
+      activeProfile.encryptedApiKey,
+      activeProfile.encryptionIv,
+      masterKey
+    );
+
+    // Use the Factory to get the correct adapter (e.g., Gemini Adapter)
+    const adapter = this.aiRegistry.createAdapterInstance(activeProfile.providerId);
+
+    return { adapter, decryptedKey, model: activeProfile.selectedModel };
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\ai\ai-registry.service.ts
+import { Injectable, Injector } from '@angular/core';
+import { IAiAdapter, AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
+
+/**
+ * The Central Registry & Factory for AI Adapters in the Framework.
+ * Pure lazy instantiation: Classes are NEVER instantiated until explicitly requested.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class AiRegistryService {
+
+  private readonly adapterClasses = new Map<string, AiAdapterConstructor>();
+  private readonly adapterMetadata = new Map<string, string>();
+
+  constructor(private readonly injector: Injector) { }
+
+  /**
+   * Registers a new AI adapter class reading purely static metadata.
+   */
+  registerAdapter(adapterClass: AiAdapterConstructor): void {
+    const id = adapterClass.providerId;
+    const name = adapterClass.displayName;
+
+    if (this.adapterClasses.has(id)) {
+      console.warn(`[AI Registry] Overwriting existing adapter class for: ${id}`);
+    }
+
+    this.adapterClasses.set(id, adapterClass);
+    this.adapterMetadata.set(id, name);
+    console.log(`[AI Registry] Successfully registered AI Factory for: ${name}`);
+  }
+
+  /**
+   * Factory Method: Creates or retrieves the instance of the requested AI Adapter.
+   */
+  createAdapterInstance(providerId: string): IAiAdapter {
+    const AdapterClass = this.adapterClasses.get(providerId);
+    if (!AdapterClass) {
+      throw new Error(`[AI Registry] Critical Error: No adapter registered for provider '${providerId}'`);
+    }
+    return this.injector.get(AdapterClass);
+  }
+
+  getAvailableProviders(): { id: string; name: string }[] {
+    return Array.from(this.adapterMetadata.entries()).map(([id, name]) => ({ id, name }));
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-message.dto.ts
+/**
+ * Standardized message format for AI interactions.
+ */
+export interface AiMessageDto {
+    readonly role: 'system' | 'user' | 'assistant';
+    readonly content: string;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-profile-entity.entity.ts
+/**
+ * Represents a stored AI provider configuration.
+ */
+export interface AiProfileEntity {
+    /** * The primary key (e.g., 'gemini', 'openai') */
+    readonly providerId: string;
+    /** * The AES-256-GCM encrypted API Key */
+    readonly encryptedApiKey: string;
+    /** * Initialization Vector used for encryption, required for decryption */
+    readonly encryptionIv: string;
+    /** * The last selected model by the user for this provider */
+    readonly selectedModel: string;
+    /** * Flag indicating if this is the currently active AI provider */
+    readonly isActive: boolean;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-request.dto.ts
+import { AiMessageDto } from './ai-message.dto';
+
+/**
+ * Standardized request payload to be sent to any AI adapter.
+ */
+export interface AiRequestDto {
+    readonly messages: AiMessageDto[];
+    /** * The specific model to use (e.g., 'gemini-1.5-pro'). If omitted, adapter uses the default. */
+    readonly model?: string;
+    readonly temperature?: number;
+    /** * Instructs the AI to return the response in JSON format if supported */
+    readonly expectJson?: boolean;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-response.dto.ts
+/**
+ * Standardized response payload returned by any AI adapter.
+ */
+export interface AiResponseDto {
+    readonly content: string;
+    readonly tokensUsed?: number;
+    readonly providerId: string;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\vault-entity.entity.ts
+/**
+ * Represents the single master lock record in the local database.
+ */
+export interface VaultEntity {
+    /** * Always 1, as there is only one master vault */
+    readonly id: number;
+    /** * Randomly generated salt used for hashing and key derivation */
+    readonly salt: string;
+    /** * SHA-256 hash of the master password + salt (used for login verification) */
+    readonly hashedPassword: string;
+    /** * Versioning for future cryptographic upgrades */
+    readonly vaultVersion: number;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\ai-adapter.interface.ts
+import { Type } from '@angular/core';
+import { Observable } from 'rxjs';
+import { AiRequestDto } from '../dtos/ai-request.dto';
+import { AiResponseDto } from '../dtos/ai-response.dto';
+
+/**
+ * The strict contract that every AI Provider instance MUST follow.
+ * Uses RxJS Observables to handle asynchronous network requests, retries, and cancellations.
+ */
+export interface IAiAdapter {
+    validateKey(apiKey: string): Observable<boolean>;
+    fetchModels(apiKey: string): Observable<string[]>;
+    generateResponse(request: AiRequestDto, apiKey: string): Observable<AiResponseDto>;
+}
+
+/**
+ * Constructor contract ensuring the class itself holds static metadata for the Factory.
+ */
+export interface AiAdapterConstructor extends Type<IAiAdapter> {
+    readonly providerId: string;
+    readonly displayName: string;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\app-plugin.interface.ts
+import { IDbSchema } from '../../database/types/db-schema.type';
+import { CoreBus } from '../../mediator/core-bus.service';
+
+/**
+ * The standard contract for any Application (Plugin) running on the Framework.
+ * Forces applications to provide their schemas and register their command/query handlers.
+ */
+export interface IAppPlugin {
+    readonly appId: string;
+    readonly requiredDbSchemas: IDbSchema[];
+
+    /**
+     * Called by the Core Engine during the boot sequence.
+     * The app MUST register all its Handlers here.
+     */
+    registerHandlers(coreBus: CoreBus): void;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\command.interface.ts
+import { IMessage } from './message.interface';
+
+/**
+ * Represents a state-mutating operation (Write).
+ * Handled by ICommandHandler.
+ */
+export interface ICommand extends IMessage {
+    /** * Strict runtime marker used by middlewares (like ValidationGuard)
+     * to intercept commands without relying on fragile string enums.
+     */
+    readonly isCommand: true;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\message-handler.interface.ts
+import { IMessage } from './message.interface';
+
+/**
+ * Base contract for processing a specific message type.
+ * @template TMessage The specific command or query class.
+ * @template TResult The expected return type (void for most commands).
+ */
+export interface IMessageHandler<TMessage extends IMessage, TResult> {
+    /**
+     * Executes the business logic for the dispatched message.
+     * @param message The strongly-typed incoming message instance.
+     */
+    handle(message: TMessage): Promise<TResult>;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\message.interface.ts
+/**
+ * Base marker interface for all messages traversing the Core Bus.
+ * In a type-safe mediator, the class reference itself acts as the unique identifier,
+ * eliminating the need for string-based action types.
+ */
+export interface IMessage {
+    // Purposefully left empty. 
+    // Implementations will define their own specific payload properties.
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\middleware.interface.ts
+import { IMessage } from './message.interface';
+
+/**
+ * Contract for intercepted operations in the Core Bus pipeline.
+ * Middlewares can modify the message, block it, or react to its success/failure.
+ */
+export interface IMiddleware {
+    /**
+     * Executes the middleware logic.
+     * @param message The incoming command or query.
+     * @param next A function that passes control to the next middleware or the final handler.
+     */
+    handle<TResult>(message: IMessage, next: () => Promise<TResult>): Promise<TResult>;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\query.interface.ts
+import { IMessage } from './message.interface';
+
+/**
+ * Represents a side-effect-free data retrieval operation (Read).
+ * Handled by IQueryHandler.
+ * @template TResult The expected return type of the query.
+ */
+export interface IQuery<TResult> extends IMessage {
+    /** * Strict runtime marker to bypass command-specific middlewares
+     * ensuring maximum read performance.
+     */
+    readonly isQuery: true;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\repositories\ai-profile-repository.repository.ts
+import { Injectable } from '@angular/core';
+import { BaseRepository } from '../base-repository.class';
+import { CoreDatabaseService } from '../core-database.service';
+import { AiProfileEntity } from '../../contracts/dtos/ai-profile-entity.entity';
+
+/**
+ * Data access layer for the 'os_ai_profiles' table.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class AiProfileRepository extends BaseRepository<AiProfileEntity, string> {
+  constructor(dbEngine: CoreDatabaseService) {
+    super(dbEngine, 'os_ai_profiles');
+  }
+
+  async getActiveProfile(): Promise<AiProfileEntity | undefined> {
+    const activeProfiles = await this.table.where({ isActive: true }).toArray();
+    return activeProfiles[0];
+  }
+
+  async wipeAllEncryptedKeys(): Promise<void> {
+    const allProfiles = await this.getAll();
+    await this.dbEngine.transaction('rw', this.table, async () => {
+      for (const profile of allProfiles) {
+        await this.update(profile.providerId, {
+          encryptedApiKey: '',
+          encryptionIv: ''
+        });
+      }
+    });
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\repositories\vault-repository.repository.ts
+import { Injectable } from '@angular/core';
+import { BaseRepository } from '../base-repository.class';
+import { CoreDatabaseService } from '../core-database.service';
+import { VaultEntity } from '../../contracts/dtos/vault-entity.entity';
+
+/**
+ * Data access layer for the mandatory 'os_vault' table.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class VaultRepository extends BaseRepository<VaultEntity, number> {
+  constructor(dbEngine: CoreDatabaseService) {
+    super(dbEngine, 'os_vault');
+  }
+
+  async getMasterVault(): Promise<VaultEntity | undefined> {
+    return await this.getById(1);
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\types\db-schema.type.ts
+/**
+ * Represents a dynamic table schema to be injected into the Core Database (Dexie).
+ * This allows applications to define their own isolated tables.
+ */
+export interface IDbSchema {
+    /** * The name of the table (e.g., 'vocabulary', 'resumes') 
+     */
+    readonly tableName: string;
+
+    /**
+     * The Dexie schema definition string.
+     * Example: '++id, term, mastery' or '++id, profileId'
+     */
+    readonly schemaDefinition: string;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\base-repository.class.ts
+import Dexie, { Table } from 'dexie';
+import { CoreDatabaseService } from './core-database.service';
+
+/**
+ * Abstract base class providing standard CRUD operations.
+ * Applications extend this class to easily interact with their specific tables.
+ * * @template T Entity interface
+ * @template TKey Primary Key type (usually string or number)
+ */
+export abstract class BaseRepository<T, TKey> {
+
+    protected readonly table: Table<T, TKey>;
+
+    constructor(
+        protected readonly dbEngine: CoreDatabaseService,
+        protected readonly tableName: string
+    ) {
+        this.table = this.dbEngine.getTable<T, TKey>(this.tableName);
+    }
+
+    async getAll(): Promise<T[]> {
+        return await this.table.toArray();
+    }
+
+    async getById(id: TKey): Promise<T | undefined> {
+        return await this.table.get(id);
+    }
+
+    async create(item: Omit<T, 'id'> | T): Promise<TKey> {
+        return await this.table.add(item as T);
+    }
+
+    async update(id: TKey, changes: Partial<T>): Promise<number> {
+        // Dexie's update expects a specific format, hence the any cast internally
+        return await this.table.update(id, changes as any);
+    }
+
+    async delete(id: TKey): Promise<void> {
+        return await this.table.delete(id);
+    }
+
+    async bulkPut(items: T[]): Promise<TKey> {
+        return await this.table.bulkPut(items);
+    }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\core-database.service.ts
+import { Injectable } from '@angular/core';
+import Dexie, { Table } from 'dexie';
+import { IDbSchema } from './types/db-schema.type';
+import { SchemaManagerService } from './schema-manager.service';
+
+/**
+ * The Central Database Engine of the Framework.
+ * Configures tables dynamically based on registered applications.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class CoreDatabaseService extends Dexie {
+
+  constructor(private readonly schemaManager: SchemaManagerService) {
+    super('ArenaFrameworkDb');
+  }
+
+  /**
+   * Initializes the database with schemas. Must be called during bootstrap.
+   * @param appSchemas Schemas collected from registered applications.
+   * @param coreSchemas Mandatory internal OS schemas.
+   */
+  async initializeDatabase(appSchemas: IDbSchema[], coreSchemas: IDbSchema[] = []): Promise<void> {
+    if (this.isOpen()) {
+      this.close();
+    }
+
+    const { version, dexieSchema } = await this.schemaManager.processSchemas(appSchemas, coreSchemas);
+
+    this.version(version).stores(dexieSchema);
+
+    try {
+      await this.open();
+      console.log(`[Core Database] Initialized successfully at version ${version}.`);
+    } catch (error) {
+      console.error('[Core Database] Critical Initialization Failure:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generic access to any dynamic table.
+   */
+  getTable<T = any, TKey = any>(tableName: string): Table<T, TKey> {
+    return this.table(tableName);
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\schema-manager.service.ts
+import { Injectable } from '@angular/core';
+import Dexie, { Table } from 'dexie';
+import { IDbSchema } from './types/db-schema.type';
+
+interface DbMetaRecord {
+  id: number;
+  version: number;
+  schemaHash: string;
+}
+
+class MetaDatabase extends Dexie {
+  public metaStore!: Table<DbMetaRecord, number>;
+
+  constructor() {
+    super('ArenaMetaDb');
+    this.version(1).stores({
+      metaStore: 'id'
+    });
+  }
+}
+
+/**
+ * Manages dynamic schema injection and evolution.
+ * Utilizes an isolated Meta-Database to track versioning securely.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class SchemaManagerService {
+
+  private readonly metaDb = new MetaDatabase();
+
+  async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {
+    const combinedSchema: Record<string, string> = {};
+    const allSchemas = [...coreSchemas, ...pluginSchemas];
+
+    allSchemas.forEach(schema => {
+      if (combinedSchema[schema.tableName]) {
+        console.warn(`[Schema Manager] Warning: Overwriting existing table schema for: ${schema.tableName}`);
+      }
+      combinedSchema[schema.tableName] = schema.schemaDefinition;
+    });
+
+    const currentSchemaString = JSON.stringify(combinedSchema);
+    const metaRecord = await this.metaDb.metaStore.get(1);
+
+    let currentVersion = metaRecord?.version || 1;
+    const savedSchemaString = metaRecord?.schemaHash;
+
+    if (savedSchemaString && savedSchemaString !== currentSchemaString) {
+      currentVersion += 1;
+      console.log(`[Schema Manager] Evolution detected. Auto-bumping database to version ${currentVersion}.`);
+    }
+
+    await this.metaDb.metaStore.put({
+      id: 1,
+      version: currentVersion,
+      schemaHash: currentSchemaString
+    });
+
+    return {
+      version: currentVersion,
+      dexieSchema: combinedSchema
+    };
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\engine\core-engine.service.ts
+import { Injectable, signal, WritableSignal } from '@angular/core';
+import { IAppPlugin } from '../contracts/interfaces/app-plugin.interface';
+import { CoreDatabaseService } from '../database/core-database.service';
+import { CoreBus } from '../mediator/core-bus.service';
+import { SecurityService } from '../security/security.service';
+import { ProcessMonitorMiddleware } from '../monitor/middlewares/process-monitor.middleware';
+import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.middleware';
+
+/**
+ * The Main Kernel of the Framework.
+ * Orchestrates the full boot sequence: Database evolution, Security verification, 
+ * Middleware mounting, and Plugin handler registration.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class CoreEngineService {
+
+  public readonly isBooted: WritableSignal<boolean> = signal(false);
+
+  constructor(
+    private readonly databaseEngine: CoreDatabaseService,
+    private readonly coreBus: CoreBus,
+    private readonly securityService: SecurityService,
+    private readonly securityGuard: SecurityGuardMiddleware,
+    private readonly processMonitor: ProcessMonitorMiddleware
+  ) { }
+
+  /**
+   * Bootstraps the OS with the provided applications.
+   * @param plugins Applications (like LanguageApp or ResumeApp) to install.
+   */
+  async boot(plugins: IAppPlugin[]): Promise<void> {
+    if (this.isBooted()) {
+      console.warn('[Core Engine] System is already booted. Ignoring duplicate boot request.');
+      return;
+    }
+
+    try {
+      console.log('[Core Engine] Boot sequence started...');
+
+      // PHASE 1: Database Initialization
+      const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
+      // We pass empty array for coreSchemas currently, as OS tables are hardcoded in repos
+      await this.databaseEngine.initializeDatabase(pluginSchemas, []);
+      console.log('[Core Engine] Phase 1: Database initialized.');
+
+      // PHASE 2: Mount Global Middlewares on the Core Bus
+      this.coreBus.useMiddleware(this.processMonitor);
+      this.coreBus.useMiddleware(this.securityGuard);
+      console.log('[Core Engine] Phase 2: System Monitor and Security Guard mounted.');
+
+      // PHASE 3: Plugin Handler Registration
+      plugins.forEach(plugin => {
+        plugin.registerHandlers(this.coreBus);
+        console.log(`[Core Engine] Registered handlers for plugin: ${plugin.appId}`);
+      });
+      console.log('[Core Engine] Phase 3: All plugin handlers mounted.');
+
+      // PHASE 4: Security Status Check
+      // Note: We don't block the boot if locked, we just log it. The SecurityGuard will block specific commands.
+      if (!this.securityService.isVaultUnlocked()) {
+        console.warn('[Core Engine] Phase 4: System is running, but Vault is LOCKED.');
+      } else {
+        console.log('[Core Engine] Phase 4: Security verified. Vault is unlocked.');
+      }
+
+      // PHASE 5: System Online
+      this.isBooted.set(true);
+      console.log('[Core Engine] Framework is fully operational.');
+
+    } catch (error) {
+      console.error('[Core Engine] Critical Boot Failure:', error);
+      this.isBooted.set(false);
+      throw error;
+    }
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\mediator\core-bus.service.ts
+import { Injectable, Injector, Type } from '@angular/core';
+import { IMessage } from '../contracts/interfaces/message.interface';
+import { IMessageHandler } from '../contracts/interfaces/message-handler.interface';
+import { IMiddleware } from '../contracts/interfaces/middleware.interface';
+
+/**
+ * The Central Command/Query Bus of the OS.
+ * Completely Type-Safe: Routes messages using their Class Constructor reference.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class CoreBus {
+
+  // The registry mapping a Message Class to its Handler Class
+  private readonly handlers = new Map<Type<IMessage>, Type<IMessageHandler<any, any>>>();
+
+  // The execution pipeline
+  private readonly middlewares: IMiddleware[] = [];
+
+  constructor(private readonly injector: Injector) { }
+
+  /**
+   * Registers a global middleware to intercept all bus traffic.
+   */
+  useMiddleware(middleware: IMiddleware): void {
+    this.middlewares.push(middleware);
+  }
+
+  /**
+   * Binds a Message Class strictly to its Handler Class.
+   */
+  registerHandler<TMessage extends IMessage, TResult>(
+    messageType: Type<TMessage>,
+    handlerType: Type<IMessageHandler<TMessage, TResult>>
+  ): void {
+    if (this.handlers.has(messageType)) {
+      console.warn(`[Core Bus] Overwriting existing handler for message: ${messageType.name}`);
+    }
+    this.handlers.set(messageType, handlerType);
+  }
+
+  /**
+   * Dispatches the message through the middleware pipeline and ultimately to the handler.
+   */
+  async dispatch<TResult>(message: IMessage): Promise<TResult> {
+    // Extract the exact Class reference of the incoming message instance
+    const messageType = message.constructor as Type<IMessage>;
+    const HandlerType = this.handlers.get(messageType);
+
+    if (!HandlerType) {
+      throw new Error(`[Core Bus] Critical Error: No handler registered for message type '${messageType.name}'.`);
+    }
+
+    // Lazy instantiation using Angular's DI container
+    const handlerInstance = this.injector.get(HandlerType);
+
+    // Build and execute the chain dynamically
+    let index = 0;
+    const executePipeline = async (): Promise<TResult> => {
+      if (index < this.middlewares.length) {
+        const currentMiddleware = this.middlewares[index++];
+        return await currentMiddleware.handle(message, executePipeline);
+      }
+
+      // Pipeline exhausted, execute the actual business logic
+      return await handlerInstance.handle(message);
+    };
+
+    return await executePipeline();
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\monitor\middlewares\process-monitor.middleware.ts
+import { Injectable } from '@angular/core';
+import { IMiddleware } from '../../contracts/interfaces/middleware.interface';
+import { IMessage } from '../../contracts/interfaces/message.interface';
+import { SystemMonitorService } from '../system-monitor.service';
+
+/**
+ * Global Middleware that wraps every action passing through the Core Bus.
+ * It manages the global loading state and acts as a generic try-catch block 
+ * to propagate unhandled exceptions to the UI safely.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class ProcessMonitorMiddleware implements IMiddleware {
+
+  constructor(private readonly monitor: SystemMonitorService) { }
+
+  async handle<TResult>(message: IMessage, next: () => Promise<TResult>): Promise<TResult> {
+    this.monitor.startProcess();
+    try {
+      const result = await next();
+      return result;
+    } catch (error) {
+      this.monitor.reportError(error);
+      // Re-throw so the specific caller also knows it failed, 
+      // but the UI has already been notified globally.
+      throw error;
+    } finally {
+      this.monitor.endProcess();
+    }
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\monitor\system-monitor.service.ts
+import { Injectable, signal, WritableSignal } from '@angular/core';
+
+/**
+ * The Central Nervous System of the framework.
+ * Tracks global processing states using Angular Signals.
+ * UI components can subscribe to these signals seamlessly.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class SystemMonitorService {
+
+  /** Represents if the Core Bus is currently actively processing a request */
+  public readonly isProcessing: WritableSignal<boolean> = signal(false);
+
+  /** Holds the latest global error message, if any */
+  public readonly latestError: WritableSignal<string | null> = signal(null);
+
+  /**
+   * Marks the system as busy and clears previous errors.
+   */
+  public startProcess(): void {
+    this.isProcessing.set(true);
+    this.latestError.set(null);
+  }
+
+  /**
+   * Marks the system as idle.
+   */
+  public endProcess(): void {
+    this.isProcessing.set(false);
+  }
+
+  /**
+   * Broadcasts an error to the entire application.
+   * @param error The error object or message thrown during a process.
+   */
+  public reportError(error: unknown): void {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('[System Monitor] Critical Error Intercepted:', errorMessage);
+    this.latestError.set(errorMessage);
+  }
+
+  /**
+   * Manually clears the error state.
+   */
+  public clearError(): void {
+    this.latestError.set(null);
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\exceptions\vault-locked.exception.ts
+export class VaultLockedException extends Error {
+    constructor(actionName: string) {
+        super(`[Security Guard] Access Denied. Cannot execute action '${actionName}' while the vault is locked.`);
+        this.name = 'VaultLockedException';
+        Object.setPrototypeOf(this, VaultLockedException.prototype);
+    }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\middlewares\security-guard.middleware.ts
+import { Injectable } from '@angular/core';
+import { IMiddleware } from '../../contracts/interfaces/middleware.interface';
+import { IMessage } from '../../contracts/interfaces/message.interface';
+import { SecurityService } from '../security.service';
+import { VaultLockedException } from '../exceptions/vault-locked.exception';
+
+/**
+ * Global Security Middleware for the Core Bus.
+ * Ensures the OS Vault is unlocked before allowing business logic to proceed.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class SecurityGuardMiddleware implements IMiddleware {
+
+  constructor(private readonly securityService: SecurityService) { }
+
+  async handle<TResult>(message: IMessage, next: () => Promise<TResult>): Promise<TResult> {
+    if (!this.securityService.isVaultUnlocked()) {
+      const actionName = message.constructor.name;
+      console.error(`[Security Guard] Blocked unauthorized attempt to execute: ${actionName}`);
+      throw new VaultLockedException(actionName);
+    }
+    return await next();
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\crypto.service.ts
+import { Injectable } from '@angular/core';
+
+/**
+ * The Cryptographic Engine of the OS.
+ * Implements AES-256-GCM for encryption and PBKDF2 for key derivation.
+ * Operates purely on the browser's native Web Crypto API.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class CryptoService {
+
+  private readonly ITERATIONS = 100000;
+  private readonly ENCRYPTION_ALGO = 'AES-GCM';
+
+  generateSalt(): string {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    return this.bufferToHex(salt.buffer);
+  }
+
+  async hashPassword(password: string, saltHex: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password + saltHex);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return this.bufferToHex(hashBuffer);
+  }
+
+  async deriveMasterKey(password: string, saltHex: string): Promise<CryptoKey> {
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(password),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits', 'deriveKey']
+    );
+
+    const saltBuffer = this.hexToBuffer(saltHex);
+
+    return await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: saltBuffer, iterations: this.ITERATIONS, hash: 'SHA-256' },
+      keyMaterial,
+      { name: this.ENCRYPTION_ALGO, length: 256 },
+      false, // Key becomes non-extractable (stays strictly in RAM)
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  async encrypt(plaintext: string, key: CryptoKey): Promise<{ cipherTextHex: string; ivHex: string }> {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encoder = new TextEncoder();
+    const encodedText = encoder.encode(plaintext);
+
+    const cipherBuffer = await crypto.subtle.encrypt(
+      { name: this.ENCRYPTION_ALGO, iv: iv },
+      key,
+      encodedText
+    );
+
+    return {
+      cipherTextHex: this.bufferToHex(cipherBuffer),
+      ivHex: this.bufferToHex(iv.buffer)
+    };
+  }
+
+  async decrypt(cipherTextHex: string, ivHex: string, key: CryptoKey): Promise<string> {
+    const cipherBuffer = this.hexToBuffer(cipherTextHex);
+    const ivBuffer = this.hexToBuffer(ivHex);
+
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      { name: this.ENCRYPTION_ALGO, iv: ivBuffer },
+      key,
+      cipherBuffer
+    );
+
+    const decoder = new TextDecoder();
+    return decoder.decode(decryptedBuffer);
+  }
+
+  private bufferToHex(buffer: ArrayBuffer): string {
+    return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  private hexToBuffer(hex: string): ArrayBuffer {
+    const bytes = new Uint8Array(Math.ceil(hex.length / 2));
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+    }
+    return bytes.buffer;
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\security.service.ts
+import { Injectable, signal, WritableSignal } from '@angular/core';
+import { CryptoService } from './crypto.service';
+import { VaultRepository } from '../database/repositories/vault-repository.repository';
+
+/**
+ * The Security Gatekeeper.
+ * Manages the memory-resident master key and controls access to the framework.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class SecurityService {
+
+  public readonly isVaultUnlocked: WritableSignal<boolean> = signal(false);
+  private sessionMasterKey: CryptoKey | null = null;
+
+  constructor(
+    private readonly cryptoService: CryptoService,
+    private readonly vaultRepo: VaultRepository
+  ) { }
+
+  async setupVault(password: string): Promise<void> {
+    const vault = await this.vaultRepo.getMasterVault();
+    if (vault) throw new Error('[Security] Vault is already initialized.');
+
+    const salt = this.cryptoService.generateSalt();
+    const hashedPassword = await this.cryptoService.hashPassword(password, salt);
+
+    await this.vaultRepo.create({ id: 1, salt, hashedPassword, vaultVersion: 1 });
+    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
+    this.isVaultUnlocked.set(true);
+
+    console.log('[Security] Vault securely initialized and unlocked.');
+  }
+
+  async unlockVault(password: string): Promise<boolean> {
+    const vault = await this.vaultRepo.getMasterVault();
+    if (!vault) throw new Error('[Security] No vault found. Setup required.');
+
+    const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
+    if (loginHash !== vault.hashedPassword) {
+      console.warn('[Security] Invalid master password attempt.');
+      return false;
+    }
+
+    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
+    this.isVaultUnlocked.set(true);
+
+    console.log('[Security] Vault unlocked successfully.');
+    return true;
+  }
+
+  lockVault(): void {
+    this.sessionMasterKey = null;
+    this.isVaultUnlocked.set(false);
+    console.log('[Security] Vault locked and RAM purged.');
+  }
+
+  getSessionKey(): CryptoKey {
+    if (!this.isVaultUnlocked() || !this.sessionMasterKey) {
+      throw new Error('[Security] Cannot access session key: Vault is locked.');
+    }
+    return this.sessionMasterKey;
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\arena-core.ts
+import { Component } from '@angular/core';
+
+@Component({
+  selector: 'lib-arena-core',
+  imports: [],
+  template: ` <p>arena-core works!</p> `,
+  styles: ``,
+})
+export class ArenaCore {}
+
+------------------------------
+Relative Path: \projects\arena-core\src\public-api.ts
+/*
+ * Public API Surface of arena-core
+ */
+
+export * from './lib/arena-core';
+
+------------------------------
