@@ -1,16 +1,16 @@
 import { Injectable } from '@angular/core';
-import { Observable, from, switchMap, finalize } from 'rxjs';
+import { Observable, from, switchMap, finalize, tap, catchError, throwError } from 'rxjs';
 import { AiRequestDto } from '../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../contracts/dtos/ai-response.dto';
 import { AiRegistryService } from './ai-registry.service';
 import { SecurityService } from '../security/security.service';
 import { AiProfileRepository } from '../database/repositories/ai-profile-repository.repository';
 import { CryptoService } from '../security/crypto.service';
+import { AiConnectionMonitorService } from '../monitor/ai-connection-monitor.service';
 
 /**
  * The Central Communication Hub for all AI operations.
- * Fetches the requested or active profile, decrypts the API key securely into RAM, 
- * routes the request via the Factory, and ensures memory scrubbing post-execution.
+ * Routes requests, manages memory scrubbing, and automatically updates connection states.
  */
 @Injectable({
   providedIn: 'root'
@@ -21,17 +21,16 @@ export class AiGatewayService {
     private readonly aiRegistry: AiRegistryService,
     private readonly securityService: SecurityService,
     private readonly profileRepo: AiProfileRepository,
-    private readonly cryptoService: CryptoService
+    private readonly cryptoService: CryptoService,
+    private readonly connectionMonitor: AiConnectionMonitorService
   ) { }
 
   /**
-   * Dispatches a request to the specified AI profile or the default active provider.
-   * @param request The standard AI request payload.
-   * @param targetProfileId Optional. If provided, bypasses the active profile and uses this specific identity.
+   * Dispatches a request and automatically monitors the connection health.
    */
   dispatch(request: AiRequestDto, targetProfileId?: string): Observable<AiResponseDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
-      switchMap(({ adapter, decryptedKey, model }) => {
+      switchMap(({ adapter, decryptedKey, model, profileId }) => {
 
         const finalRequest: AiRequestDto = {
           ...request,
@@ -39,6 +38,43 @@ export class AiGatewayService {
         };
 
         return adapter.generateResponse(finalRequest, decryptedKey).pipe(
+          tap(() => {
+            // Update UI Monitor on successful communication
+            this.connectionMonitor.updateState(profileId, 'Connected');
+          }),
+          catchError((error) => {
+            // Differentiate between auth errors and network errors
+            const errorMsg = String(error).toLowerCase();
+            const state = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401')
+              ? 'InvalidKey'
+              : 'Disconnected';
+
+            this.connectionMonitor.updateState(profileId, state);
+            return throwError(() => error);
+          }),
+          finalize(() => {
+            decryptedKey = '';
+          })
+        );
+      })
+    );
+  }
+
+  /**
+   * Manually verifies a profile's connection without executing a full prompt.
+   * Useful for Settings pages to test API keys on demand.
+   */
+  pingProfile(profileId: string): Observable<boolean> {
+    return from(this.prepareSecureContext(profileId)).pipe(
+      switchMap(({ adapter, decryptedKey, profileId }) => {
+        return adapter.validateKey(decryptedKey).pipe(
+          tap((isValid) => {
+            this.connectionMonitor.updateState(profileId, isValid ? 'Connected' : 'InvalidKey');
+          }),
+          catchError((error) => {
+            this.connectionMonitor.updateState(profileId, 'Disconnected');
+            return throwError(() => error);
+          }),
           finalize(() => {
             decryptedKey = '';
           })
@@ -66,6 +102,7 @@ export class AiGatewayService {
 
     const adapter = this.aiRegistry.createAdapterInstance(profile.providerId);
 
-    return { adapter, decryptedKey, model: profile.selectedModel };
+    // Return profileId as well so the RxJS pipeline can update the correct monitor state
+    return { adapter, decryptedKey, model: profile.selectedModel, profileId: profile.profileId };
   }
 }
