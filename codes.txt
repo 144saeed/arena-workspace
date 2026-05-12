@@ -192,14 +192,16 @@ export class GoogleGeminiAdapter implements IAiAdapter {
           parts.push({ text: p.text });
         } else if (p.type === 'tool-call' && p.toolCall) {
           parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
-        } else if (p.type === 'tool-result' && p.toolCallId) {
+        } else if (p.type === 'tool-result') {
           let parsedResponse = {};
           try {
             parsedResponse = p.toolResult ? JSON.parse(p.toolResult) : {};
           } catch (e) {
             parsedResponse = { message: p.toolResult };
           }
-          parts.push({ functionResponse: { name: p.toolCallId, response: parsedResponse } });
+          // CRITICAL FIX: Use the preserved toolCallName explicitly for Google Gemini
+          const targetName = p.toolCallName || p.toolCallId || 'unknown_function';
+          parts.push({ functionResponse: { name: targetName, response: parsedResponse } });
         } else if (p.type === 'image' && p.imageUrl) {
           const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
           if (match) {
@@ -270,7 +272,6 @@ import { FrameworkError } from '../../exceptions/framework-error.exception';
 })
 export class AgentExecutorService {
 
-  // ARCHITECTURE FIX: Increased default iterations to support complex reasoning chains
   private readonly DEFAULT_MAX_ITERATIONS = 5;
 
   constructor(
@@ -312,44 +313,48 @@ export class AgentExecutorService {
         let hasFatalError = false;
         let fatalErrorMessage = '';
 
-        // ARCHITECTURE FIX: Local AbortController to cancel sibling tool executions if one fails fatally
         const batchAbortController = new AbortController();
         const mainAbortListener = () => batchAbortController.abort();
         if (abortSignal) abortSignal.addEventListener('abort', mainAbortListener);
 
-        const executionPromises = response.toolCalls.map(async (toolCall) => {
-          console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
-          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
+        try {
+          const executionPromises = response.toolCalls.map(async (toolCall) => {
+            console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
+            const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
-          if (result.status === 'fatal_error') {
-            batchAbortController.abort(); // Cancel parallel tools
-          }
-          return { toolCall, result };
-        });
-
-        const executionResults = await Promise.all(executionPromises);
-        if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
-
-        for (const { toolCall, result } of executionResults) {
-          const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
-          toolResultsParts.push({
-            type: 'tool-result',
-            toolCallId: toolCall.id,
-            toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
+            if (result.status === 'fatal_error') {
+              batchAbortController.abort();
+            }
+            return { toolCall, result };
           });
-          if (result.status === 'fatal_error') {
-            hasFatalError = true;
-            fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
+
+          const executionResults = await Promise.all(executionPromises);
+
+          for (const { toolCall, result } of executionResults) {
+            const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
+            toolResultsParts.push({
+              type: 'tool-result',
+              toolCallId: toolCall.id,
+              toolCallName: toolCall.name, // CRITICAL FIX: Retain original function name for the adapter
+              toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
+            });
+            if (result.status === 'fatal_error') {
+              hasFatalError = true;
+              fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
+            }
           }
-        }
 
-        currentRequest = {
-          ...currentRequest,
-          messages: [...currentRequest.messages, { role: 'tool', parts: toolResultsParts }]
-        };
+          currentRequest = {
+            ...currentRequest,
+            messages: [...currentRequest.messages, { role: 'tool', parts: toolResultsParts }]
+          };
 
-        if (hasFatalError) {
-          throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
+          if (hasFatalError) {
+            throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
+          }
+        } finally {
+          // ARCHITECTURE FIX: Guarantee listener removal to prevent insidious memory leaks
+          if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
         }
         continue;
       }
@@ -534,6 +539,7 @@ export class AiGatewayService {
 Relative Path: \projects\arena-core\src\lib\ai\ai-registry.service.ts
 import { Injectable, Injector } from '@angular/core';
 import { IAiAdapter, AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 /**
  * The Central Registry & Factory for AI Adapters in the Framework.
@@ -557,7 +563,12 @@ export class AiRegistryService {
     const name = adapterClass.displayName;
 
     if (this.adapterClasses.has(id)) {
-      console.warn(`[AI Registry] Overwriting existing adapter class for: ${id}`);
+      // SECURITY FIX: Prevent malicious adapter overriding
+      throw new FrameworkError(
+        'ADAPTER_COLLISION',
+        `Critical Error: An AI Adapter with the provider ID '${id}' is already registered. Overriding is strictly prohibited for security reasons.`,
+        false
+      );
     }
 
     this.adapterClasses.set(id, adapterClass);
@@ -570,6 +581,7 @@ export class AiRegistryService {
    */
   createAdapterInstance(providerId: string): IAiAdapter {
     const AdapterClass = this.adapterClasses.get(providerId);
+
     if (!AdapterClass) {
       throw new Error(`[AI Registry] Critical Error: No adapter registered for provider '${providerId}'`);
     }
@@ -639,8 +651,12 @@ export interface AiMessagePartDto {
     /** * Present if type is 'tool-call'. Contains the AI's request to execute a function */
     readonly toolCall?: AiToolCallDto;
 
-    /** * Present if type is 'tool-result'. Maps back to the toolCall ID */
+    /** * Present if type is 'tool-result'. Maps back to the toolCall ID (UUID) for internal tracking */
     readonly toolCallId?: string;
+
+    /** * ARCHITECTURE FIX: Present if type is 'tool-result'. The actual name of the function executed.
+     * Crucial for AI Providers like Gemini that strictly require the function name in the response. */
+    readonly toolCallName?: string;
 
     /** * Present if type is 'tool-result'. The stringified outcome of the execution */
     readonly toolResult?: string;
@@ -1636,21 +1652,21 @@ Relative Path: \projects\arena-core\src\lib\security\security.service.ts
 import { Injectable, signal } from '@angular/core';
 import { CryptoService } from './crypto.service';
 import { VaultRepository } from '../database/repositories/vault-repository.repository';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
-/**
- * The Security Gatekeeper.
- * Manages the memory-resident master key and controls access to the framework.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class SecurityService {
 
-  // SECURITY FIX: Prevent external tampering by exposing only a readonly signal
   private readonly _isVaultUnlocked = signal<boolean>(false);
   public readonly isVaultUnlocked = this._isVaultUnlocked.asReadonly();
 
   private sessionMasterKey: CryptoKey | null = null;
+
+  // SECURITY FIX: Anti-brute-force mechanism
+  private failedAttempts = 0;
+  private readonly MIN_PASSWORD_LENGTH = 8;
 
   constructor(
     private readonly cryptoService: CryptoService,
@@ -1659,7 +1675,12 @@ export class SecurityService {
 
   async setupVault(password: string): Promise<void> {
     const vault = await this.vaultRepo.getMasterVault();
-    if (vault) throw new Error('[Security] Vault is already initialized.');
+    if (vault) throw new FrameworkError('VAULT_EXISTS', '[Security] Vault is already initialized.', false);
+
+    // SECURITY FIX: Enforce minimum password strength
+    if (!password || password.length < this.MIN_PASSWORD_LENGTH) {
+      throw new FrameworkError('WEAK_PASSWORD', `Master password must be at least ${this.MIN_PASSWORD_LENGTH} characters long.`, false);
+    }
 
     const salt = this.cryptoService.generateSalt();
     const hashedPassword = await this.cryptoService.hashPassword(password, salt);
@@ -1673,16 +1694,20 @@ export class SecurityService {
 
   async unlockVault(password: string): Promise<boolean> {
     const vault = await this.vaultRepo.getMasterVault();
-    if (!vault) throw new Error('[Security] No vault found. Setup required.');
+    if (!vault) throw new FrameworkError('VAULT_MISSING', '[Security] No vault found. Setup required.', false);
 
     const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
 
-    // SECURITY FIX: Mitigate timing attacks during password validation
     if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
-      console.warn('[Security] Invalid master password attempt.');
+      // SECURITY FIX: Exponential backoff to thwart automated brute-force attacks
+      this.failedAttempts++;
+      const delayMs = Math.min(Math.pow(2, this.failedAttempts) * 100, 5000); // Max 5 seconds delay
+      console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
+      await new Promise(r => setTimeout(r, delayMs));
       return false;
     }
 
+    this.failedAttempts = 0; // Reset counter on success
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
     this._isVaultUnlocked.set(true);
 
@@ -1698,7 +1723,7 @@ export class SecurityService {
 
   getSessionKey(): CryptoKey {
     if (!this.isVaultUnlocked() || !this.sessionMasterKey) {
-      throw new Error('[Security] Cannot access session key: Vault is locked.');
+      throw new FrameworkError('VAULT_LOCKED', '[Security] Cannot access session key: Vault is locked.', false);
     }
     return this.sessionMasterKey;
   }
@@ -1736,7 +1761,6 @@ export class SystemPortabilityService {
       exportData[table.name] = await table.toArray();
     }
 
-    // SECURITY FIX: Encrypt the entire export payload to protect sensitive user data
     const rawJson = JSON.stringify(exportData);
     const masterKey = this.securityService.getSessionKey();
     const { cipherTextHex, ivHex } = await this.cryptoService.encrypt(rawJson, masterKey);
@@ -1750,20 +1774,28 @@ export class SystemPortabilityService {
     }
 
     try {
-      const parsedWrap = JSON.parse(jsonString);
-      let payloadStr = jsonString;
-
-      // Handle Decryption if format is the new secure encrypted export
-      if (parsedWrap.isArenaEncryptedExport) {
-        const masterKey = this.securityService.getSessionKey();
-        payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
+      let parsedWrap;
+      try {
+        parsedWrap = JSON.parse(jsonString);
+      } catch (e) {
+        throw new Error('Malformed JSON string.');
       }
 
+      // SECURITY FIX: Reject legacy plain-text backups to enforce security
+      if (!parsedWrap.isArenaEncryptedExport || !parsedWrap.data || !parsedWrap.ivHex) {
+        throw new FrameworkError('INSECURE_IMPORT', 'Plain-text or invalid backups are rejected for security reasons.', false);
+      }
+
+      const masterKey = this.securityService.getSessionKey();
+      const payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
       const parsedData: Record<string, any[]> = JSON.parse(payloadStr);
 
-      // SECURITY FIX: Prevent malformed payload crashes
+      // SECURITY FIX: Prevent Prototype Pollution and DOS via malformed structures
       if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
         throw new Error('Invalid export format structure.');
+      }
+      if ('__proto__' in parsedData || 'constructor' in parsedData) {
+        throw new Error('Malicious prototype pollution payload detected.');
       }
 
       const systemTables = this.schemaManager.systemTables;
@@ -1781,7 +1813,7 @@ export class SystemPortabilityService {
       console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
       console.error('[Portability] Failed to import ecosystem:', error);
-      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or wrong encryption key.', false, error);
+      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format, structural corruption, or wrong encryption key.', false, error);
     }
   }
 
@@ -1801,8 +1833,6 @@ export class SystemPortabilityService {
 
   async factoryReset(): Promise<void> {
     console.warn('[Portability] INITIATING FACTORY RESET...');
-    // ARCHITECTURE NOTE: We explicitly DO NOT require vault authentication here.
-    // This is the emergency escape hatch for users who lost their master password.
     this.securityService.lockVault();
 
     try {

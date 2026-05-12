@@ -191,14 +191,16 @@ export class GoogleGeminiAdapter implements IAiAdapter {
           parts.push({ text: p.text });
         } else if (p.type === 'tool-call' && p.toolCall) {
           parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
-        } else if (p.type === 'tool-result' && p.toolCallId) {
+        } else if (p.type === 'tool-result') {
           let parsedResponse = {};
           try {
             parsedResponse = p.toolResult ? JSON.parse(p.toolResult) : {};
           } catch (e) {
             parsedResponse = { message: p.toolResult };
           }
-          parts.push({ functionResponse: { name: p.toolCallId, response: parsedResponse } });
+          // CRITICAL FIX: Use the preserved toolCallName explicitly for Google Gemini
+          const targetName = p.toolCallName || p.toolCallId || 'unknown_function';
+          parts.push({ functionResponse: { name: targetName, response: parsedResponse } });
         } else if (p.type === 'image' && p.imageUrl) {
           const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
           if (match) {

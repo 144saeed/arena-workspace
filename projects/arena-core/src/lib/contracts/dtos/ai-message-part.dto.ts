@@ -18,8 +18,12 @@ export interface AiMessagePartDto {
     /** * Present if type is 'tool-call'. Contains the AI's request to execute a function */
     readonly toolCall?: AiToolCallDto;
 
-    /** * Present if type is 'tool-result'. Maps back to the toolCall ID */
+    /** * Present if type is 'tool-result'. Maps back to the toolCall ID (UUID) for internal tracking */
     readonly toolCallId?: string;
+
+    /** * ARCHITECTURE FIX: Present if type is 'tool-result'. The actual name of the function executed.
+     * Crucial for AI Providers like Gemini that strictly require the function name in the response. */
+    readonly toolCallName?: string;
 
     /** * Present if type is 'tool-result'. The stringified outcome of the execution */
     readonly toolResult?: string;

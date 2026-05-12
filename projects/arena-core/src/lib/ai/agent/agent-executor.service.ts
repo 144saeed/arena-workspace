@@ -13,7 +13,6 @@ import { FrameworkError } from '../../exceptions/framework-error.exception';
 })
 export class AgentExecutorService {
 
-  // ARCHITECTURE FIX: Increased default iterations to support complex reasoning chains
   private readonly DEFAULT_MAX_ITERATIONS = 5;
 
   constructor(
@@ -55,44 +54,48 @@ export class AgentExecutorService {
         let hasFatalError = false;
         let fatalErrorMessage = '';
 
-        // ARCHITECTURE FIX: Local AbortController to cancel sibling tool executions if one fails fatally
         const batchAbortController = new AbortController();
         const mainAbortListener = () => batchAbortController.abort();
         if (abortSignal) abortSignal.addEventListener('abort', mainAbortListener);
 
-        const executionPromises = response.toolCalls.map(async (toolCall) => {
-          console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
-          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
+        try {
+          const executionPromises = response.toolCalls.map(async (toolCall) => {
+            console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
+            const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
-          if (result.status === 'fatal_error') {
-            batchAbortController.abort(); // Cancel parallel tools
-          }
-          return { toolCall, result };
-        });
-
-        const executionResults = await Promise.all(executionPromises);
-        if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
-
-        for (const { toolCall, result } of executionResults) {
-          const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
-          toolResultsParts.push({
-            type: 'tool-result',
-            toolCallId: toolCall.id,
-            toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
+            if (result.status === 'fatal_error') {
+              batchAbortController.abort();
+            }
+            return { toolCall, result };
           });
-          if (result.status === 'fatal_error') {
-            hasFatalError = true;
-            fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
+
+          const executionResults = await Promise.all(executionPromises);
+
+          for (const { toolCall, result } of executionResults) {
+            const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
+            toolResultsParts.push({
+              type: 'tool-result',
+              toolCallId: toolCall.id,
+              toolCallName: toolCall.name, // CRITICAL FIX: Retain original function name for the adapter
+              toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
+            });
+            if (result.status === 'fatal_error') {
+              hasFatalError = true;
+              fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
+            }
           }
-        }
 
-        currentRequest = {
-          ...currentRequest,
-          messages: [...currentRequest.messages, { role: 'tool', parts: toolResultsParts }]
-        };
+          currentRequest = {
+            ...currentRequest,
+            messages: [...currentRequest.messages, { role: 'tool', parts: toolResultsParts }]
+          };
 
-        if (hasFatalError) {
-          throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
+          if (hasFatalError) {
+            throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
+          }
+        } finally {
+          // ARCHITECTURE FIX: Guarantee listener removal to prevent insidious memory leaks
+          if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
         }
         continue;
       }
