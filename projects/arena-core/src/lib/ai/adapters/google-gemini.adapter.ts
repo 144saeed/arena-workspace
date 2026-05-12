@@ -23,7 +23,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   public static readonly capabilities: AiCapabilitiesDto = {
     supportsStreaming: true,
     supportsTools: true,
-    supportsVision: false, // Update to true when vision payload mapping is implemented
+    supportsVision: false,
     supportsJsonMode: true
   };
 
@@ -60,7 +60,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: abortSignal // SECURITY/PERF FIX: Connect AbortSignal to native fetch
+        signal: abortSignal
       }).then(async res => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
@@ -71,11 +71,16 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto> {
+  generateStream(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
     return new Observable<AiEventDto>(subscriber => {
       const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
+
+      // FIX: Bind the external generic abortSignal to the internal native abortController
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => abortController.abort());
+      }
 
       fetch(endpoint, {
         method: 'POST',
@@ -119,7 +124,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   if (part.text) chunkText += part.text;
                   if (part.functionCall) {
                     toolCalls.push({
-                      id: crypto.randomUUID(), // FIX: Generate unique ID to prevent agent confusion
+                      id: crypto.randomUUID(),
                       name: part.functionCall.name,
                       arguments: part.functionCall.args
                     });
@@ -156,7 +161,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       generationConfig: { temperature: request.temperature || 0.7 }
     };
 
-    // FIX: Isolate system messages into the native 'systemInstruction' property
     const systemMessages = request.messages.filter(m => m.role === 'system');
     const conversationalMessages = request.messages.filter(m => m.role !== 'system');
 
@@ -181,7 +185,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         } else if (p.type === 'tool-call' && p.toolCall) {
           parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
         } else if (p.type === 'tool-result' && p.toolCallId) {
-          // FIX: Parse structured object instead of nesting in 'result' key
           let parsedResponse = {};
           try {
             parsedResponse = p.toolResult ? JSON.parse(p.toolResult) : {};
@@ -228,7 +231,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
-          id: crypto.randomUUID(), // FIX: Ensure unique IDs for non-streaming mode too
+          id: crypto.randomUUID(),
           name: part.functionCall.name,
           arguments: part.functionCall.args
         });

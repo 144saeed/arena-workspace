@@ -27,10 +27,6 @@ export class AiGatewayService {
     private readonly connectionMonitor: AiConnectionMonitorService
   ) { }
 
-  /**
-   * Dispatches a request for a complete, single-turn response.
-   * Passes the AbortSignal down to the adapter layer for native network cancellation.
-   */
   dispatch(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
@@ -44,14 +40,12 @@ export class AiGatewayService {
     );
   }
 
-  /**
-   * Dispatches a request and returns a continuous stream of AI events (SSE).
-   */
-  dispatchStream(request: AiRequestDto, targetProfileId?: string): Observable<AiEventDto> {
+  dispatchStream(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        return adapter.generateStream(finalRequest, decryptedKey).pipe(
+        // FIX: Pass abortSignal down to the stream adapter
+        return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
           tap({
             next: (event) => {
               if (event.type === 'chunk' || event.type === 'complete') {

@@ -13,13 +13,11 @@ export interface IAiAdapter {
     validateKey(apiKey: string): Observable<boolean>;
     fetchModels(apiKey: string): Observable<string[]>;
 
-    /** * Executes a standard, single-turn full response (Best for JSON/Data extraction).
-     * Now strictly supports AbortSignal for network-level cancellation.
-     */
+    /** * Executes a standard, single-turn full response (Best for JSON/Data extraction). */
     generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto>;
 
-    /** * Executes a Server-Sent Events (SSE) stream returning continuous chunks (Best for Chat/UX) */
-    generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto>;
+    /** * Executes a Server-Sent Events (SSE) stream returning continuous chunks (Best for Chat/UX). */
+    generateStream(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiEventDto>;
 }
 
 /**

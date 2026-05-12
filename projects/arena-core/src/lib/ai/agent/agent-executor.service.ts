@@ -42,14 +42,12 @@ export class AgentExecutorService {
     let iterationCount = 0;
 
     while (iterationCount < maxIterations) {
-      // 1. Blackhole Check: Immediately halt if the user or system cancelled the operation
       if (abortSignal?.aborted) {
         throw new FrameworkError('AGENT_ABORTED', 'Agent execution was cancelled.', false);
       }
 
       iterationCount++;
 
-      // SECURITY/PERF FIX: Pass abortSignal down to the gateway to halt native fetch requests
       const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId, abortSignal));
 
       if (!response) {
@@ -80,18 +78,14 @@ export class AgentExecutorService {
         let hasFatalError = false;
         let fatalErrorMessage = '';
 
-        // 2. Parallel Execution: Fire all tools simultaneously to prevent sequential bottlenecks
         const executionPromises = response.toolCalls.map(async (toolCall) => {
           console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
-          // Pass the abort signal down so local tools can cancel their own long-running tasks
           const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, abortSignal);
           return { toolCall, result };
         });
 
-        // Wait for all tools in this batch to complete
         const executionResults = await Promise.all(executionPromises);
 
-        // Process the parallel results sequentially to update the payload and check for fatal errors
         for (const { toolCall, result } of executionResults) {
           const resultPayload = result.status === 'success'
             ? result.data
@@ -99,7 +93,7 @@ export class AgentExecutorService {
 
           toolResultsParts.push({
             type: 'tool-result',
-            toolCallId: toolCall.name,
+            toolCallId: toolCall.id, // CRITICAL FIX: Use the adapter-generated UUID to prevent execution collisions
             toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
           });
 
