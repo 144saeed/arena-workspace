@@ -10,7 +10,8 @@ import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 /**
  * The Orchestrator Engine for Autonomous AI Agents.
- * Now fully supports multimodal parts, structured tool results, and semantic error halting.
+ * Now fully supports multimodal parts, structured tool results, semantic error halting,
+ * parallel tool execution, and secure task cancellation via AbortSignal.
  */
 @Injectable({
   providedIn: 'root'
@@ -27,7 +28,8 @@ export class AgentExecutorService {
   async executeTask(
     request: AiRequestDto,
     targetProfileId?: string,
-    maxIterations: number = this.DEFAULT_MAX_ITERATIONS
+    maxIterations: number = this.DEFAULT_MAX_ITERATIONS,
+    abortSignal?: AbortSignal
   ): Promise<AiResponseDto> {
 
     let currentRequest: AiRequestDto = {
@@ -40,6 +42,11 @@ export class AgentExecutorService {
     let iterationCount = 0;
 
     while (iterationCount < maxIterations) {
+      // 1. Blackhole Check: Immediately halt if the user or system cancelled the operation
+      if (abortSignal?.aborted) {
+        throw new FrameworkError('AGENT_ABORTED', 'Agent execution was cancelled.', false);
+      }
+
       iterationCount++;
 
       const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId));
@@ -50,7 +57,6 @@ export class AgentExecutorService {
 
       if (response.toolCalls && response.toolCalls.length > 0) {
 
-        // Convert the assistant's string/tool responses into proper multimodal parts
         const assistantParts: AiMessagePartDto[] = [];
         if (response.content) {
           assistantParts.push({ type: 'text', text: response.content });
@@ -73,13 +79,19 @@ export class AgentExecutorService {
         let hasFatalError = false;
         let fatalErrorMessage = '';
 
-        // Execute tools and evaluate their semantic structured status
-        for (const toolCall of response.toolCalls) {
+        // 2. Parallel Execution: Fire all tools simultaneously to prevent sequential bottlenecks
+        const executionPromises = response.toolCalls.map(async (toolCall) => {
           console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
+          // Pass the abort signal down so local tools can cancel their own long-running tasks
+          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, abortSignal);
+          return { toolCall, result };
+        });
 
-          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments);
+        // Wait for all tools in this batch to complete
+        const executionResults = await Promise.all(executionPromises);
 
-          // Map structured result back to string for the AI's understanding
+        // Process the parallel results sequentially to update the payload and check for fatal errors
+        for (const { toolCall, result } of executionResults) {
           const resultPayload = result.status === 'success'
             ? result.data
             : { error: result.errorMessage, suggestion: 'Please fix the parameters or try a different approach.' };
@@ -93,7 +105,6 @@ export class AgentExecutorService {
           if (result.status === 'fatal_error') {
             hasFatalError = true;
             fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
-            break; // Halt parallel tool execution in this batch
           }
         }
 
@@ -107,7 +118,6 @@ export class AgentExecutorService {
           messages: [...currentRequest.messages, toolMessage]
         };
 
-        // Semantic Halt: Break the infinite loop if the tool critically failed
         if (hasFatalError) {
           throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
         }

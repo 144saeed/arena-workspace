@@ -157,8 +157,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
   // --- Internal Data Mapping Utilities ---
 
-  // --- Internal Data Mapping Utilities ---
-
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
       contents: request.messages.map(msg => {
@@ -186,7 +184,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
             }
           }
         });
-
         return { role, parts };
       }),
       generationConfig: { temperature: request.temperature || 0.7 }
@@ -215,7 +212,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
     let content = '';
     const toolCalls: any[] = [];
-
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
@@ -226,7 +222,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         });
       }
     });
-
     return {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
