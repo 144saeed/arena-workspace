@@ -10,10 +10,6 @@ import { CryptoService } from '../security/crypto.service';
 import { AiConnectionMonitorService } from '../monitor/ai-connection-monitor.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
-/**
- * The Central Communication Hub for all AI operations.
- * Routes requests, manages memory scrubbing, and automatically updates connection states.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -31,6 +27,7 @@ export class AiGatewayService {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
+
         return adapter.generateResponse(finalRequest, decryptedKey, abortSignal).pipe(
           tap(() => this.connectionMonitor.updateState(profileId, 'Connected')),
           catchError((error) => this.handleConnectionError(error, profileId))
@@ -43,7 +40,6 @@ export class AiGatewayService {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        // FIX: Pass abortSignal down to the stream adapter
         return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
           tap({
             next: (event) => {
@@ -86,18 +82,15 @@ export class AiGatewayService {
   }
 
   private handleConnectionError(error: any, profileId: string): Observable<never> {
-    const errorMsg = String(error).toLowerCase();
-    const isAuthError = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401');
+    // ARCHITECTURE FIX: Rely on strict HTTP status codes from the adapter instead of brittle string matching
+    const isAuthError = error instanceof FrameworkError && error.code === 'AI_AUTH_FAILED';
     const state = isAuthError ? 'InvalidKey' : 'Disconnected';
 
     this.connectionMonitor.updateState(profileId, state);
 
-    const frameworkError = new FrameworkError(
-      isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
-      error.message || 'AI Connection failed',
-      !isAuthError,
-      error
-    );
+    const frameworkError = error instanceof FrameworkError
+      ? error
+      : new FrameworkError('AI_NETWORK_ERROR', error.message || 'AI Connection failed', true, error);
 
     return throwError(() => frameworkError);
   }

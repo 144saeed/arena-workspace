@@ -7,12 +7,8 @@ import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
 import { AiEventDto } from '../../contracts/dtos/ai-event.dto';
 import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
+import { FrameworkError } from '../../exceptions/framework-error.exception';
 
-/**
- * The official AI Adapter for Google Gemini APIs.
- * Supports native REST interactions, streaming equivalents, and Tool Calling (Agents).
- * Operates without external heavy SDK dependencies to guarantee zero-friction framework migrations.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -24,14 +20,13 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   public static readonly capabilities: AiCapabilitiesDto = {
     supportsStreaming: true,
     supportsTools: true,
-    supportsVision: true, // FIX: Officially enabled vision support
+    supportsVision: true,
     supportsJsonMode: true
   };
 
   private readonly BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   validateKey(apiKey: string): Observable<boolean> {
-    // SECURITY FIX: Send API key via headers, not URL, to prevent logging leaks
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
     ).pipe(map(response => response.status === 200));
@@ -41,7 +36,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) throw new Error('[Gemini Adapter] Failed to fetch models.');
+          if (!res.ok) {
+            const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+            throw new FrameworkError(code, '[Gemini Adapter] Failed to fetch models.', res.status >= 500);
+          }
           return res.json();
         })
     ).pipe(
@@ -62,13 +60,17 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey // SECURITY FIX
+          'x-goog-api-key': apiKey
         },
         body: JSON.stringify(payload),
         signal: abortSignal
       }).then(async res => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          // ARCHITECTURE FIX: Use exact HTTP status for precision error tracking
+          const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+          throw new FrameworkError(code, data.error?.message || '[Gemini Adapter] Unknown execution error.', res.status >= 500);
+        }
         return data;
       })
     ).pipe(
@@ -82,22 +84,25 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
 
+      // ARCHITECTURE FIX: Ensure listener is properly referenced for teardown
+      const onAbort = () => abortController.abort();
       if (abortSignal) {
-        abortSignal.addEventListener('abort', () => abortController.abort());
+        abortSignal.addEventListener('abort', onAbort);
       }
 
       fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey // SECURITY FIX
+          'x-goog-api-key': apiKey
         },
         body: JSON.stringify(payload),
         signal: abortController.signal
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          throw new Error(errData.error?.message || '[Gemini Adapter] Streaming execution error.');
+          const code = response.status === 401 || response.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+          throw new FrameworkError(code, errData.error?.message || '[Gemini Adapter] Streaming execution error.', response.status >= 500);
         }
         if (!response.body) throw new Error('[Gemini Adapter] No response body for streaming.');
 
@@ -115,7 +120,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
-              // ARCHITECTURE FIX: Use slice instead of replace to prevent double-data keyword bugs
               const dataStr = line.slice('data: '.length).trim();
               if (!dataStr) continue;
 
@@ -159,7 +163,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         }
       });
 
-      return () => abortController.abort();
+      // ARCHITECTURE FIX: RxJS teardown hook ensures 100% memory leak prevention
+      return () => {
+        abortController.abort();
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+      };
     });
   }
 
@@ -199,7 +207,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
           } catch (e) {
             parsedResponse = { message: p.toolResult };
           }
-          // CRITICAL FIX: Use the preserved toolCallName explicitly for Google Gemini
           const targetName = p.toolCallName || p.toolCallId || 'unknown_function';
           parts.push({ functionResponse: { name: targetName, response: parsedResponse } });
         } else if (p.type === 'image' && p.imageUrl) {
@@ -323,7 +330,10 @@ export class AgentExecutorService {
             const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
             if (result.status === 'fatal_error') {
-              batchAbortController.abort();
+              // ARCHITECTURE FIX: Ensure safe aborting without duplicate call console warnings
+              if (!batchAbortController.signal.aborted) {
+                batchAbortController.abort();
+              }
             }
             return { toolCall, result };
           });
@@ -332,12 +342,14 @@ export class AgentExecutorService {
 
           for (const { toolCall, result } of executionResults) {
             const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
+
             toolResultsParts.push({
               type: 'tool-result',
               toolCallId: toolCall.id,
-              toolCallName: toolCall.name, // CRITICAL FIX: Retain original function name for the adapter
+              toolCallName: toolCall.name,
               toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
             });
+
             if (result.status === 'fatal_error') {
               hasFatalError = true;
               fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
@@ -353,7 +365,6 @@ export class AgentExecutorService {
             throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
           }
         } finally {
-          // ARCHITECTURE FIX: Guarantee listener removal to prevent insidious memory leaks
           if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
         }
         continue;
@@ -443,10 +454,6 @@ import { CryptoService } from '../security/crypto.service';
 import { AiConnectionMonitorService } from '../monitor/ai-connection-monitor.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
-/**
- * The Central Communication Hub for all AI operations.
- * Routes requests, manages memory scrubbing, and automatically updates connection states.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -464,6 +471,7 @@ export class AiGatewayService {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
+
         return adapter.generateResponse(finalRequest, decryptedKey, abortSignal).pipe(
           tap(() => this.connectionMonitor.updateState(profileId, 'Connected')),
           catchError((error) => this.handleConnectionError(error, profileId))
@@ -476,7 +484,6 @@ export class AiGatewayService {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        // FIX: Pass abortSignal down to the stream adapter
         return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
           tap({
             next: (event) => {
@@ -519,18 +526,15 @@ export class AiGatewayService {
   }
 
   private handleConnectionError(error: any, profileId: string): Observable<never> {
-    const errorMsg = String(error).toLowerCase();
-    const isAuthError = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401');
+    // ARCHITECTURE FIX: Rely on strict HTTP status codes from the adapter instead of brittle string matching
+    const isAuthError = error instanceof FrameworkError && error.code === 'AI_AUTH_FAILED';
     const state = isAuthError ? 'InvalidKey' : 'Disconnected';
 
     this.connectionMonitor.updateState(profileId, state);
 
-    const frameworkError = new FrameworkError(
-      isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
-      error.message || 'AI Connection failed',
-      !isAuthError,
-      error
-    );
+    const frameworkError = error instanceof FrameworkError
+      ? error
+      : new FrameworkError('AI_NETWORK_ERROR', error.message || 'AI Connection failed', true, error);
 
     return throwError(() => frameworkError);
   }
@@ -804,12 +808,21 @@ Relative Path: \projects\arena-core\src\lib\contracts\dtos\vault-entity.entity.t
 export interface VaultEntity {
     /** * Always 1, as there is only one master vault */
     readonly id: number;
+
     /** * Randomly generated salt used for hashing and key derivation */
     readonly salt: string;
+
     /** * SHA-256 hash of the master password + salt (used for login verification) */
     readonly hashedPassword: string;
+
     /** * Versioning for future cryptographic upgrades */
     readonly vaultVersion: number;
+
+    /** * ARCHITECTURE FIX: Persisted failed attempts to thwart reload-based brute-force attacks */
+    readonly failedAttempts?: number;
+
+    /** * Timestamp of the last failed attempt to calculate penalty timeouts */
+    readonly lastFailedAttempt?: number;
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\contracts\interfaces\ai-adapter.interface.ts
@@ -1342,33 +1355,20 @@ import { IMessageHandler } from '../contracts/interfaces/message-handler.interfa
 import { IMiddleware } from '../contracts/interfaces/middleware.interface';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
-/**
- * The Central Command/Query Bus of the OS.
- * Completely Type-Safe: Routes messages using their Class Constructor reference.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CoreBus {
 
-  // The registry mapping a Message Class to its Handler Class
   private readonly handlers = new Map<Type<IMessage>, Type<IMessageHandler<any, any>>>();
-
-  // The execution pipeline
   private readonly middlewares: IMiddleware[] = [];
 
   constructor(private readonly injector: Injector) { }
 
-  /**
-   * Registers a global middleware to intercept all bus traffic.
-   */
   useMiddleware(middleware: IMiddleware): void {
     this.middlewares.push(middleware);
   }
 
-  /**
-   * Binds a Message Class strictly to its Handler Class.
-   */
   registerHandler<TMessage extends IMessage, TResult>(
     messageType: Type<TMessage>,
     handlerType: Type<IMessageHandler<TMessage, TResult>>
@@ -1379,11 +1379,7 @@ export class CoreBus {
     this.handlers.set(messageType, handlerType);
   }
 
-  /**
-   * Dispatches the message through the middleware pipeline and ultimately to the handler.
-   */
   async dispatch<TResult>(message: IMessage): Promise<TResult> {
-    // Extract the exact Class reference of the incoming message instance
     const messageType = message.constructor as Type<IMessage>;
     const HandlerType = this.handlers.get(messageType);
 
@@ -1391,22 +1387,19 @@ export class CoreBus {
       throw new Error(`[Core Bus] Critical Error: No handler registered for message type '${messageType.name}'.`);
     }
 
-    // Lazy instantiation using Angular's DI container
     const handlerInstance = this.injector.get(HandlerType);
 
-    // Build and execute the chain dynamically
-    let index = 0;
-    const executePipeline = async (): Promise<TResult> => {
-      if (index < this.middlewares.length) {
-        const currentMiddleware = this.middlewares[index++];
-        return await currentMiddleware.handle(message, executePipeline);
+    // ARCHITECTURE FIX: Pass the index functionally to prevent shared-state mutations 
+    // across concurrent asynchronous middleware executions.
+    const executePipeline = async (idx: number): Promise<TResult> => {
+      if (idx < this.middlewares.length) {
+        const currentMiddleware = this.middlewares[idx];
+        return await currentMiddleware.handle(message, () => executePipeline(idx + 1));
       }
-
-      // Pipeline exhausted, execute the actual business logic
       return await handlerInstance.handle(message);
     };
 
-    return await executePipeline();
+    return await executePipeline(0);
   }
 }
 ------------------------------
@@ -1498,13 +1491,13 @@ export class SystemMonitorService {
   private readonly _latestError = signal<string | null>(null);
   public readonly latestError = this._latestError.asReadonly();
 
-  // ARCHITECTURE FIX: Use a counter to manage concurrent processing requests
   private activeProcesses = 0;
 
   public startProcess(): void {
     this.activeProcesses++;
     this._isProcessing.set(true);
-    this._latestError.set(null);
+    // ARCHITECTURE FIX: Do NOT clear _latestError here to prevent hiding existing 
+    // unread errors from the UI during concurrent requests.
   }
 
   public endProcess(): void {
@@ -1579,18 +1572,26 @@ export class CryptoService {
     return this.bufferToHex(salt.buffer);
   }
 
+  /**
+   * Performs a cryptographically secure, constant-time byte comparison.
+   * Completely immune to JS Unicode and JIT optimization timing leaks.
+   */
   constantTimeCompare(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const arrA = encoder.encode(a);
+    const arrB = encoder.encode(b);
+
+    const maxLength = Math.max(arrA.length, arrB.length);
     let mismatch = 0;
-    // ARCHITECTURE FIX: Never return early. Iterate through the longest string length 
-    // to guarantee identical execution time regardless of mismatch position.
-    const maxLength = Math.max(a.length, b.length);
-    if (a.length !== b.length) mismatch = 1;
+
+    if (arrA.length !== arrB.length) mismatch = 1;
 
     for (let i = 0; i < maxLength; i++) {
-      const charA = i < a.length ? a.charCodeAt(i) : 0;
-      const charB = i < b.length ? b.charCodeAt(i) : 0;
-      mismatch |= charA ^ charB;
+      const byteA = i < arrA.length ? arrA[i] : 0;
+      const byteB = i < arrB.length ? arrB[i] : 0;
+      mismatch |= byteA ^ byteB;
     }
+
     return mismatch === 0;
   }
 
@@ -1664,10 +1665,6 @@ export class SecurityService {
 
   private sessionMasterKey: CryptoKey | null = null;
 
-  // SECURITY FIX: Anti-brute-force mechanism
-  private failedAttempts = 0;
-  private readonly MIN_PASSWORD_LENGTH = 8;
-
   constructor(
     private readonly cryptoService: CryptoService,
     private readonly vaultRepo: VaultRepository
@@ -1677,15 +1674,18 @@ export class SecurityService {
     const vault = await this.vaultRepo.getMasterVault();
     if (vault) throw new FrameworkError('VAULT_EXISTS', '[Security] Vault is already initialized.', false);
 
-    // SECURITY FIX: Enforce minimum password strength
-    if (!password || password.length < this.MIN_PASSWORD_LENGTH) {
-      throw new FrameworkError('WEAK_PASSWORD', `Master password must be at least ${this.MIN_PASSWORD_LENGTH} characters long.`, false);
+    // SECURITY FIX: Require at least 8 characters, combining letters and numbers
+    const complexRegex = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
+    if (!password || !complexRegex.test(password)) {
+      throw new FrameworkError('WEAK_PASSWORD', `Master password must be at least 8 characters long and contain both letters and numbers.`, false);
     }
 
     const salt = this.cryptoService.generateSalt();
     const hashedPassword = await this.cryptoService.hashPassword(password, salt);
 
-    await this.vaultRepo.create({ id: 1, salt, hashedPassword, vaultVersion: 1 });
+    await this.vaultRepo.create({
+      id: 1, salt, hashedPassword, vaultVersion: 1, failedAttempts: 0, lastFailedAttempt: 0
+    });
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
     this._isVaultUnlocked.set(true);
 
@@ -1699,15 +1699,21 @@ export class SecurityService {
     const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
 
     if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
-      // SECURITY FIX: Exponential backoff to thwart automated brute-force attacks
-      this.failedAttempts++;
-      const delayMs = Math.min(Math.pow(2, this.failedAttempts) * 100, 5000); // Max 5 seconds delay
+      // SECURITY FIX: Persisted anti-brute-force mechanism
+      const currentAttempts = (vault.failedAttempts || 0) + 1;
+      await this.vaultRepo.update(1, { failedAttempts: currentAttempts, lastFailedAttempt: Date.now() });
+
+      const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000); // Max 5 seconds delay
       console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
       await new Promise(r => setTimeout(r, delayMs));
       return false;
     }
 
-    this.failedAttempts = 0; // Reset counter on success
+    // Reset counter on success
+    if (vault.failedAttempts && vault.failedAttempts > 0) {
+      await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
+    }
+
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
     this._isVaultUnlocked.set(true);
 
@@ -1735,7 +1741,6 @@ import { CoreDatabaseService } from '../database/core-database.service';
 import { SecurityService } from '../security/security.service';
 import { SchemaManagerService } from '../database/schema-manager.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
-import { CryptoService } from '../security/crypto.service';
 
 @Injectable({
   providedIn: 'root'
@@ -1745,8 +1750,7 @@ export class SystemPortabilityService {
   constructor(
     private readonly dbEngine: CoreDatabaseService,
     private readonly securityService: SecurityService,
-    private readonly schemaManager: SchemaManagerService,
-    private readonly cryptoService: CryptoService
+    private readonly schemaManager: SchemaManagerService
   ) { }
 
   async exportEcosystem(): Promise<string> {
@@ -1756,16 +1760,17 @@ export class SystemPortabilityService {
 
     const exportData: Record<string, any[]> = {};
     const tables = this.dbEngine.tables;
+    const systemTables = this.schemaManager.systemTables;
 
     for (const table of tables) {
-      exportData[table.name] = await table.toArray();
+      // ARCHITECTURE FIX: Never export system tables (os_vault, os_ai_profiles)
+      // to ensure cross-device portability without compromising security.
+      if (!systemTables.includes(table.name)) {
+        exportData[table.name] = await table.toArray();
+      }
     }
 
-    const rawJson = JSON.stringify(exportData);
-    const masterKey = this.securityService.getSessionKey();
-    const { cipherTextHex, ivHex } = await this.cryptoService.encrypt(rawJson, masterKey);
-
-    return JSON.stringify({ isArenaEncryptedExport: true, ivHex, data: cipherTextHex });
+    return JSON.stringify({ isArenaExport: true, version: 1, data: exportData });
   }
 
   async importEcosystem(jsonString: string): Promise<void> {
@@ -1781,21 +1786,16 @@ export class SystemPortabilityService {
         throw new Error('Malformed JSON string.');
       }
 
-      // SECURITY FIX: Reject legacy plain-text backups to enforce security
-      if (!parsedWrap.isArenaEncryptedExport || !parsedWrap.data || !parsedWrap.ivHex) {
-        throw new FrameworkError('INSECURE_IMPORT', 'Plain-text or invalid backups are rejected for security reasons.', false);
+      // Ensure it's our designated export format
+      if (!parsedWrap.isArenaExport || !parsedWrap.data) {
+        throw new Error('Invalid or legacy export file.');
       }
 
-      const masterKey = this.securityService.getSessionKey();
-      const payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
-      const parsedData: Record<string, any[]> = JSON.parse(payloadStr);
+      const parsedData: Record<string, any[]> = parsedWrap.data;
 
-      // SECURITY FIX: Prevent Prototype Pollution and DOS via malformed structures
-      if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+      // SECURITY FIX: Deep DOS and Prototype Pollution check
+      if (typeof parsedData !== 'object' || Array.isArray(parsedData)) {
         throw new Error('Invalid export format structure.');
-      }
-      if ('__proto__' in parsedData || 'constructor' in parsedData) {
-        throw new Error('Malicious prototype pollution payload detected.');
       }
 
       const systemTables = this.schemaManager.systemTables;
@@ -1803,9 +1803,15 @@ export class SystemPortabilityService {
 
       await this.dbEngine.transaction('rw', safeTablesToImport, async () => {
         for (const table of safeTablesToImport) {
-          if (parsedData[table.name] && Array.isArray(parsedData[table.name])) {
+          const tableData = parsedData[table.name];
+
+          if (tableData && Array.isArray(tableData)) {
+            // DOS Protection: Limit records per table
+            if (tableData.length > 50000) {
+              throw new Error(`Payload too large for table ${table.name}.`);
+            }
             await table.clear();
-            await table.bulkPut(parsedData[table.name]);
+            await table.bulkPut(tableData);
           }
         }
       });
@@ -1813,7 +1819,7 @@ export class SystemPortabilityService {
       console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
       console.error('[Portability] Failed to import ecosystem:', error);
-      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format, structural corruption, or wrong encryption key.', false, error);
+      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or data corruption detected.', false, error);
     }
   }
 

@@ -64,7 +64,10 @@ export class AgentExecutorService {
             const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
             if (result.status === 'fatal_error') {
-              batchAbortController.abort();
+              // ARCHITECTURE FIX: Ensure safe aborting without duplicate call console warnings
+              if (!batchAbortController.signal.aborted) {
+                batchAbortController.abort();
+              }
             }
             return { toolCall, result };
           });
@@ -73,12 +76,14 @@ export class AgentExecutorService {
 
           for (const { toolCall, result } of executionResults) {
             const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
+
             toolResultsParts.push({
               type: 'tool-result',
               toolCallId: toolCall.id,
-              toolCallName: toolCall.name, // CRITICAL FIX: Retain original function name for the adapter
+              toolCallName: toolCall.name,
               toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
             });
+
             if (result.status === 'fatal_error') {
               hasFatalError = true;
               fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
@@ -94,7 +99,6 @@ export class AgentExecutorService {
             throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
           }
         } finally {
-          // ARCHITECTURE FIX: Guarantee listener removal to prevent insidious memory leaks
           if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
         }
         continue;

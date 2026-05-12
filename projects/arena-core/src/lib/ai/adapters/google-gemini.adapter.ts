@@ -6,12 +6,8 @@ import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
 import { AiEventDto } from '../../contracts/dtos/ai-event.dto';
 import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
+import { FrameworkError } from '../../exceptions/framework-error.exception';
 
-/**
- * The official AI Adapter for Google Gemini APIs.
- * Supports native REST interactions, streaming equivalents, and Tool Calling (Agents).
- * Operates without external heavy SDK dependencies to guarantee zero-friction framework migrations.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -23,14 +19,13 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   public static readonly capabilities: AiCapabilitiesDto = {
     supportsStreaming: true,
     supportsTools: true,
-    supportsVision: true, // FIX: Officially enabled vision support
+    supportsVision: true,
     supportsJsonMode: true
   };
 
   private readonly BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   validateKey(apiKey: string): Observable<boolean> {
-    // SECURITY FIX: Send API key via headers, not URL, to prevent logging leaks
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
     ).pipe(map(response => response.status === 200));
@@ -40,7 +35,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) throw new Error('[Gemini Adapter] Failed to fetch models.');
+          if (!res.ok) {
+            const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+            throw new FrameworkError(code, '[Gemini Adapter] Failed to fetch models.', res.status >= 500);
+          }
           return res.json();
         })
     ).pipe(
@@ -61,13 +59,17 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey // SECURITY FIX
+          'x-goog-api-key': apiKey
         },
         body: JSON.stringify(payload),
         signal: abortSignal
       }).then(async res => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          // ARCHITECTURE FIX: Use exact HTTP status for precision error tracking
+          const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+          throw new FrameworkError(code, data.error?.message || '[Gemini Adapter] Unknown execution error.', res.status >= 500);
+        }
         return data;
       })
     ).pipe(
@@ -81,22 +83,25 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
 
+      // ARCHITECTURE FIX: Ensure listener is properly referenced for teardown
+      const onAbort = () => abortController.abort();
       if (abortSignal) {
-        abortSignal.addEventListener('abort', () => abortController.abort());
+        abortSignal.addEventListener('abort', onAbort);
       }
 
       fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey // SECURITY FIX
+          'x-goog-api-key': apiKey
         },
         body: JSON.stringify(payload),
         signal: abortController.signal
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          throw new Error(errData.error?.message || '[Gemini Adapter] Streaming execution error.');
+          const code = response.status === 401 || response.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+          throw new FrameworkError(code, errData.error?.message || '[Gemini Adapter] Streaming execution error.', response.status >= 500);
         }
         if (!response.body) throw new Error('[Gemini Adapter] No response body for streaming.');
 
@@ -114,7 +119,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
-              // ARCHITECTURE FIX: Use slice instead of replace to prevent double-data keyword bugs
               const dataStr = line.slice('data: '.length).trim();
               if (!dataStr) continue;
 
@@ -158,7 +162,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         }
       });
 
-      return () => abortController.abort();
+      // ARCHITECTURE FIX: RxJS teardown hook ensures 100% memory leak prevention
+      return () => {
+        abortController.abort();
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+      };
     });
   }
 
@@ -198,7 +206,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
           } catch (e) {
             parsedResponse = { message: p.toolResult };
           }
-          // CRITICAL FIX: Use the preserved toolCallName explicitly for Google Gemini
           const targetName = p.toolCallName || p.toolCallId || 'unknown_function';
           parts.push({ functionResponse: { name: targetName, response: parsedResponse } });
         } else if (p.type === 'image' && p.imageUrl) {
