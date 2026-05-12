@@ -1,4 +1,4 @@
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { CryptoService } from './crypto.service';
 import { VaultRepository } from '../database/repositories/vault-repository.repository';
 
@@ -11,7 +11,10 @@ import { VaultRepository } from '../database/repositories/vault-repository.repos
 })
 export class SecurityService {
 
-  public readonly isVaultUnlocked: WritableSignal<boolean> = signal(false);
+  // SECURITY FIX: Prevent external tampering by exposing only a readonly signal
+  private readonly _isVaultUnlocked = signal<boolean>(false);
+  public readonly isVaultUnlocked = this._isVaultUnlocked.asReadonly();
+
   private sessionMasterKey: CryptoKey | null = null;
 
   constructor(
@@ -28,7 +31,7 @@ export class SecurityService {
 
     await this.vaultRepo.create({ id: 1, salt, hashedPassword, vaultVersion: 1 });
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
-    this.isVaultUnlocked.set(true);
+    this._isVaultUnlocked.set(true);
 
     console.log('[Security] Vault securely initialized and unlocked.');
   }
@@ -38,13 +41,15 @@ export class SecurityService {
     if (!vault) throw new Error('[Security] No vault found. Setup required.');
 
     const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
-    if (loginHash !== vault.hashedPassword) {
+
+    // SECURITY FIX: Mitigate timing attacks during password validation
+    if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
       console.warn('[Security] Invalid master password attempt.');
       return false;
     }
 
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
-    this.isVaultUnlocked.set(true);
+    this._isVaultUnlocked.set(true);
 
     console.log('[Security] Vault unlocked successfully.');
     return true;
@@ -52,7 +57,7 @@ export class SecurityService {
 
   lockVault(): void {
     this.sessionMasterKey = null;
-    this.isVaultUnlocked.set(false);
+    this._isVaultUnlocked.set(false);
     console.log('[Security] Vault locked and RAM purged.');
   }
 

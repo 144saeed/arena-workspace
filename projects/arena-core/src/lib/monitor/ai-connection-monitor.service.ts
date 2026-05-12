@@ -1,4 +1,4 @@
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 
 export type ConnectionState = 'Connected' | 'Disconnected' | 'InvalidKey' | 'Unknown';
 
@@ -17,30 +17,22 @@ export interface ProfileConnectionState {
 })
 export class AiConnectionMonitorService {
 
-  /**
-   * A reactive map of profile connections.
-   * Key: profileId, Value: ProfileConnectionState
-   */
-  public readonly connectionStates: WritableSignal<Map<string, ProfileConnectionState>> = signal(new Map());
+  // SECURITY FIX: Expose map as readonly to prevent external component mutations
+  private readonly _connectionStates = signal<Map<string, ProfileConnectionState>>(new Map());
+  public readonly connectionStates = this._connectionStates.asReadonly();
 
-  /**
-   * Updates the connection status for a specific AI Profile.
-   */
   updateState(profileId: string, state: ConnectionState): void {
-    const currentMap = new Map(this.connectionStates());
+    const currentMap = new Map(this._connectionStates());
     currentMap.set(profileId, {
       profileId,
       state,
       lastChecked: new Date()
     });
-    this.connectionStates.set(currentMap);
+    this._connectionStates.set(currentMap);
   }
 
-  /**
-   * Retrieves the current connection state of a profile.
-   */
   getState(profileId: string): ConnectionState {
-    const stateObj = this.connectionStates().get(profileId);
+    const stateObj = this._connectionStates().get(profileId);
     return stateObj ? stateObj.state : 'Unknown';
   }
 }

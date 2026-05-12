@@ -10,12 +10,26 @@ import { Injectable } from '@angular/core';
 })
 export class CryptoService {
 
-  private readonly ITERATIONS = 100000;
+  // SECURITY FIX: Upgraded to OWASP 2024 recommendations
+  private readonly ITERATIONS = 600000;
+  private readonly SALT_SIZE_BYTES = 32;
   private readonly ENCRYPTION_ALGO = 'AES-GCM';
 
   generateSalt(): string {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const salt = crypto.getRandomValues(new Uint8Array(this.SALT_SIZE_BYTES));
     return this.bufferToHex(salt.buffer);
+  }
+
+  /**
+   * Performs a constant-time string comparison to prevent cryptographic timing attacks.
+   */
+  constantTimeCompare(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let result = 0;
+    for (let i = 0; i < a.length; i++) {
+      result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+    return result === 0;
   }
 
   async hashPassword(password: string, saltHex: string): Promise<string> {
@@ -60,7 +74,7 @@ export class CryptoService {
       { name: 'PBKDF2', salt: saltBuffer, iterations: this.ITERATIONS, hash: 'SHA-256' },
       keyMaterial,
       { name: this.ENCRYPTION_ALGO, length: 256 },
-      false, // Key becomes non-extractable (stays strictly in RAM)
+      false,
       ['encrypt', 'decrypt']
     );
   }

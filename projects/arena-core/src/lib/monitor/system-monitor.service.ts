@@ -1,4 +1,4 @@
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 
 /**
  * The Central Nervous System of the framework.
@@ -10,41 +10,30 @@ import { Injectable, signal, WritableSignal } from '@angular/core';
 })
 export class SystemMonitorService {
 
-  /** Represents if the Core Bus is currently actively processing a request */
-  public readonly isProcessing: WritableSignal<boolean> = signal(false);
+  // SECURITY FIX: Expose signals as readonly to prevent unauthorized mutations
+  private readonly _isProcessing = signal<boolean>(false);
+  public readonly isProcessing = this._isProcessing.asReadonly();
 
-  /** Holds the latest global error message, if any */
-  public readonly latestError: WritableSignal<string | null> = signal(null);
+  private readonly _latestError = signal<string | null>(null);
+  public readonly latestError = this._latestError.asReadonly();
 
-  /**
-   * Marks the system as busy and clears previous errors.
-   */
   public startProcess(): void {
-    this.isProcessing.set(true);
-    this.latestError.set(null);
+    this._isProcessing.set(true);
+    this._latestError.set(null);
   }
 
-  /**
-   * Marks the system as idle.
-   */
   public endProcess(): void {
-    this.isProcessing.set(false);
+    this._isProcessing.set(false);
   }
 
-  /**
-   * Broadcasts an error to the entire application.
-   * @param error The error object or message thrown during a process.
-   */
   public reportError(error: unknown): void {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('[System Monitor] Critical Error Intercepted:', errorMessage);
-    this.latestError.set(errorMessage);
+    // SECURITY FIX: Abstracted error logging to prevent leaking stack traces or sensitive data
+    console.warn('[System Monitor] An internal error occurred and was captured by the monitor.');
+    this._latestError.set(errorMessage);
   }
 
-  /**
-   * Manually clears the error state.
-   */
   public clearError(): void {
-    this.latestError.set(null);
+    this._latestError.set(null);
   }
 }

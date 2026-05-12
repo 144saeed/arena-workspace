@@ -24,7 +24,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   public static readonly capabilities: AiCapabilitiesDto = {
     supportsStreaming: true,
     supportsTools: true,
-    supportsVision: false, // Update to true when vision payload mapping is implemented
+    supportsVision: false,
     supportsJsonMode: true
   };
 
@@ -61,7 +61,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: abortSignal // SECURITY/PERF FIX: Connect AbortSignal to native fetch
+        signal: abortSignal
       }).then(async res => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
@@ -72,11 +72,16 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto> {
+  generateStream(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
     return new Observable<AiEventDto>(subscriber => {
       const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
+
+      // FIX: Bind the external generic abortSignal to the internal native abortController
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => abortController.abort());
+      }
 
       fetch(endpoint, {
         method: 'POST',
@@ -120,7 +125,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   if (part.text) chunkText += part.text;
                   if (part.functionCall) {
                     toolCalls.push({
-                      id: crypto.randomUUID(), // FIX: Generate unique ID to prevent agent confusion
+                      id: crypto.randomUUID(),
                       name: part.functionCall.name,
                       arguments: part.functionCall.args
                     });
@@ -157,7 +162,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       generationConfig: { temperature: request.temperature || 0.7 }
     };
 
-    // FIX: Isolate system messages into the native 'systemInstruction' property
     const systemMessages = request.messages.filter(m => m.role === 'system');
     const conversationalMessages = request.messages.filter(m => m.role !== 'system');
 
@@ -182,7 +186,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         } else if (p.type === 'tool-call' && p.toolCall) {
           parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
         } else if (p.type === 'tool-result' && p.toolCallId) {
-          // FIX: Parse structured object instead of nesting in 'result' key
           let parsedResponse = {};
           try {
             parsedResponse = p.toolResult ? JSON.parse(p.toolResult) : {};
@@ -229,7 +232,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
-          id: crypto.randomUUID(), // FIX: Ensure unique IDs for non-streaming mode too
+          id: crypto.randomUUID(),
           name: part.functionCall.name,
           arguments: part.functionCall.args
         });
@@ -289,14 +292,12 @@ export class AgentExecutorService {
     let iterationCount = 0;
 
     while (iterationCount < maxIterations) {
-      // 1. Blackhole Check: Immediately halt if the user or system cancelled the operation
       if (abortSignal?.aborted) {
         throw new FrameworkError('AGENT_ABORTED', 'Agent execution was cancelled.', false);
       }
 
       iterationCount++;
 
-      // SECURITY/PERF FIX: Pass abortSignal down to the gateway to halt native fetch requests
       const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId, abortSignal));
 
       if (!response) {
@@ -327,18 +328,14 @@ export class AgentExecutorService {
         let hasFatalError = false;
         let fatalErrorMessage = '';
 
-        // 2. Parallel Execution: Fire all tools simultaneously to prevent sequential bottlenecks
         const executionPromises = response.toolCalls.map(async (toolCall) => {
           console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
-          // Pass the abort signal down so local tools can cancel their own long-running tasks
           const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, abortSignal);
           return { toolCall, result };
         });
 
-        // Wait for all tools in this batch to complete
         const executionResults = await Promise.all(executionPromises);
 
-        // Process the parallel results sequentially to update the payload and check for fatal errors
         for (const { toolCall, result } of executionResults) {
           const resultPayload = result.status === 'success'
             ? result.data
@@ -346,7 +343,7 @@ export class AgentExecutorService {
 
           toolResultsParts.push({
             type: 'tool-result',
-            toolCallId: toolCall.name,
+            toolCallId: toolCall.id, // CRITICAL FIX: Use the adapter-generated UUID to prevent execution collisions
             toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
           });
 
@@ -470,10 +467,6 @@ export class AiGatewayService {
     private readonly connectionMonitor: AiConnectionMonitorService
   ) { }
 
-  /**
-   * Dispatches a request for a complete, single-turn response.
-   * Passes the AbortSignal down to the adapter layer for native network cancellation.
-   */
   dispatch(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
@@ -487,14 +480,12 @@ export class AiGatewayService {
     );
   }
 
-  /**
-   * Dispatches a request and returns a continuous stream of AI events (SSE).
-   */
-  dispatchStream(request: AiRequestDto, targetProfileId?: string): Observable<AiEventDto> {
+  dispatchStream(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        return adapter.generateStream(finalRequest, decryptedKey).pipe(
+        // FIX: Pass abortSignal down to the stream adapter
+        return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
           tap({
             next: (event) => {
               if (event.type === 'chunk' || event.type === 'complete') {
@@ -836,13 +827,11 @@ export interface IAiAdapter {
     validateKey(apiKey: string): Observable<boolean>;
     fetchModels(apiKey: string): Observable<string[]>;
 
-    /** * Executes a standard, single-turn full response (Best for JSON/Data extraction).
-     * Now strictly supports AbortSignal for network-level cancellation.
-     */
+    /** * Executes a standard, single-turn full response (Best for JSON/Data extraction). */
     generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto>;
 
-    /** * Executes a Server-Sent Events (SSE) stream returning continuous chunks (Best for Chat/UX) */
-    generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto>;
+    /** * Executes a Server-Sent Events (SSE) stream returning continuous chunks (Best for Chat/UX). */
+    generateStream(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiEventDto>;
 }
 
 /**
