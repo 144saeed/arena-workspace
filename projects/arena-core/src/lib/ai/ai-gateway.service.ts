@@ -9,7 +9,7 @@ import { CryptoService } from '../security/crypto.service';
 
 /**
  * The Central Communication Hub for all AI operations.
- * Fetches the active profile, decrypts the API key securely into RAM, 
+ * Fetches the requested or active profile, decrypts the API key securely into RAM, 
  * routes the request via the Factory, and ensures memory scrubbing post-execution.
  */
 @Injectable({
@@ -25,22 +25,20 @@ export class AiGatewayService {
   ) { }
 
   /**
-   * Dispatches a request to the currently active AI provider using RxJS.
+   * Dispatches a request to the specified AI profile or the default active provider.
+   * @param request The standard AI request payload.
+   * @param targetProfileId Optional. If provided, bypasses the active profile and uses this specific identity.
    */
-  dispatch(request: AiRequestDto): Observable<AiResponseDto> {
-    // We use RxJS 'from' to convert the Promise-based DB and Crypto calls into an Observable stream
-    return from(this.prepareSecureContext()).pipe(
+  dispatch(request: AiRequestDto, targetProfileId?: string): Observable<AiResponseDto> {
+    return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model }) => {
 
-        // Inject the default model if the request didn't specify one
         const finalRequest: AiRequestDto = {
           ...request,
           model: request.model || model
         };
 
-        // Execute the AI call
         return adapter.generateResponse(finalRequest, decryptedKey).pipe(
-          // Memory Scrubbing: Dereference the decrypted key immediately after the stream completes or errors
           finalize(() => {
             decryptedKey = '';
           })
@@ -49,24 +47,25 @@ export class AiGatewayService {
     );
   }
 
-  private async prepareSecureContext() {
-    const activeProfile = await this.profileRepo.getActiveProfile();
-    if (!activeProfile) {
-      throw new Error('[AI Gateway] Cannot dispatch request: No active AI profile found.');
+  private async prepareSecureContext(targetProfileId?: string) {
+    const profile = targetProfileId
+      ? await this.profileRepo.getById(targetProfileId)
+      : await this.profileRepo.getActiveProfile();
+
+    if (!profile) {
+      throw new Error(`[AI Gateway] Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`);
     }
 
     const masterKey = this.securityService.getSessionKey();
 
-    // Decrypt the API key into a local variable (RAM only)
     const decryptedKey = await this.cryptoService.decrypt(
-      activeProfile.encryptedApiKey,
-      activeProfile.encryptionIv,
+      profile.encryptedApiKey,
+      profile.encryptionIv,
       masterKey
     );
 
-    // Use the Factory to get the correct adapter (e.g., Gemini Adapter)
-    const adapter = this.aiRegistry.createAdapterInstance(activeProfile.providerId);
+    const adapter = this.aiRegistry.createAdapterInstance(profile.providerId);
 
-    return { adapter, decryptedKey, model: activeProfile.selectedModel };
+    return { adapter, decryptedKey, model: profile.selectedModel };
   }
 }

@@ -23,7 +23,7 @@ export class AiProfileRepository extends BaseRepository<AiProfileEntity, string>
     const allProfiles = await this.getAll();
     await this.dbEngine.transaction('rw', this.table, async () => {
       for (const profile of allProfiles) {
-        await this.update(profile.providerId, {
+        await this.update(profile.profileId, {
           encryptedApiKey: '',
           encryptionIv: ''
         });

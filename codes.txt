@@ -1,4 +1,172 @@
-﻿Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\ai\ai-gateway.service.ts
+﻿Relative Path: \projects\arena-core\src\lib\ai\adapters\google-gemini.adapter.ts
+import { Injectable } from '@angular/core';
+import { Observable, from } from 'rxjs';
+import { map } from 'rxjs/operators';
+import { IAiAdapter } from '../../contracts/interfaces/ai-adapter.interface';
+import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
+import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
+
+/**
+ * The official AI Adapter for Google Gemini APIs.
+ * Supports native REST interactions, streaming equivalents, and Tool Calling (Agents).
+ * Operates without external heavy SDK dependencies to guarantee zero-friction framework migrations.
+ */
+@Injectable({
+  providedIn: 'root'
+})
+export class GoogleGeminiAdapter implements IAiAdapter {
+
+  // Static metadata required by the AiRegistryService (Factory Pattern)
+  public static readonly providerId = 'google-gemini';
+  public static readonly displayName = 'Google Gemini';
+
+  private readonly BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+  /**
+   * Validates the provided API key by attempting to fetch the model list.
+   */
+  validateKey(apiKey: string): Observable<boolean> {
+    return from(
+      fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
+    ).pipe(
+      map(response => response.status === 200)
+    );
+  }
+
+  /**
+   * Fetches all available generative models (filtering out non-text/generation models).
+   */
+  fetchModels(apiKey: string): Observable<string[]> {
+    return from(
+      fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
+        .then(res => {
+          if (!res.ok) throw new Error('[Gemini Adapter] Failed to fetch models.');
+          return res.json();
+        })
+    ).pipe(
+      map((data: any) => {
+        return data.models
+          .filter((m: any) => m.supportedGenerationMethods.includes('generateContent'))
+          .map((m: any) => m.name.replace('models/', ''));
+      })
+    );
+  }
+
+  /**
+   * Executes a prompt and handles Function Calling (Tools) mapping.
+   */
+  generateResponse(request: AiRequestDto, apiKey: string): Observable<AiResponseDto> {
+    const endpoint = `${this.BASE_URL}/${request.model}:generateContent?key=${apiKey}`;
+    const payload = this.mapRequestToGeminiFormat(request);
+
+    return from(
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(async res => {
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
+        }
+        return data;
+      })
+    ).pipe(
+      map((geminiResponse: any) => this.mapGeminiResponseToStandard(geminiResponse))
+    );
+  }
+
+  // --- Internal Data Mapping Utilities ---
+
+  private mapRequestToGeminiFormat(request: AiRequestDto): any {
+    const payload: any = {
+      contents: request.messages.map(msg => {
+
+        // Handle standard roles
+        let role = 'user';
+        if (msg.role === 'assistant') role = 'model';
+        if (msg.role === 'tool') role = 'function'; // Gemini specific mapping
+
+        const parts: any[] = [];
+
+        if (msg.role === 'tool' && msg.toolCallId) {
+          // Send tool execution results back to Gemini
+          parts.push({
+            functionResponse: {
+              name: msg.toolCallId,
+              response: { result: msg.content }
+            }
+          });
+        } else if (msg.toolCalls && msg.toolCalls.length > 0) {
+          // Assistant requesting tool execution
+          msg.toolCalls.forEach(call => {
+            parts.push({
+              functionCall: {
+                name: call.name,
+                args: call.arguments
+              }
+            });
+          });
+        } else {
+          // Standard text message
+          parts.push({ text: msg.content });
+        }
+
+        return { role, parts };
+      }),
+      generationConfig: {
+        temperature: request.temperature || 0.7
+      }
+    };
+
+    // Inject Tool Declarations if the framework provided them
+    if (request.tools && request.tools.length > 0) {
+      payload.tools = [{
+        functionDeclarations: request.tools.map(t => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters
+        }))
+      }];
+    }
+
+    if (request.expectJson) {
+      payload.generationConfig.responseMimeType = 'application/json';
+    }
+
+    return payload;
+  }
+
+  private mapGeminiResponseToStandard(geminiResponse: any): AiResponseDto {
+    const candidate = geminiResponse.candidates?.[0];
+    const parts = candidate?.content?.parts || [];
+
+    let content = '';
+    const toolCalls: any[] = [];
+
+    parts.forEach((part: any) => {
+      if (part.text) {
+        content += part.text;
+      }
+      if (part.functionCall) {
+        toolCalls.push({
+          id: part.functionCall.name, // Gemini relies on the name for correlation
+          name: part.functionCall.name,
+          arguments: part.functionCall.args
+        });
+      }
+    });
+
+    return {
+      content: content.trim(),
+      tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
+      providerId: GoogleGeminiAdapter.providerId,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+    };
+  }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\ai\ai-gateway.service.ts
 import { Injectable } from '@angular/core';
 import { Observable, from, switchMap, finalize } from 'rxjs';
 import { AiRequestDto } from '../contracts/dtos/ai-request.dto';
@@ -72,7 +240,7 @@ export class AiGatewayService {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\ai\ai-registry.service.ts
+Relative Path: \projects\arena-core\src\lib\ai\ai-registry.service.ts
 import { Injectable, Injector } from '@angular/core';
 import { IAiAdapter, AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
 
@@ -122,16 +290,27 @@ export class AiRegistryService {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-message.dto.ts
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-message.dto.ts
+import { AiToolCallDto } from './ai-tool-call.dto';
+
 /**
- * Standardized message format for AI interactions.
+ * Standardized message format for AI interactions, completely supporting Agent workflows.
  */
 export interface AiMessageDto {
-    readonly role: 'system' | 'user' | 'assistant';
+    /** * The role of the message author. 'tool' is used when providing function execution results. */
+    readonly role: 'system' | 'user' | 'assistant' | 'tool';
+
+    /** * The text content of the message. Can be empty if the message is purely a tool call. */
     readonly content: string;
+
+    /** * Present if the assistant is requesting to execute one or more tools. */
+    readonly toolCalls?: AiToolCallDto[];
+
+    /** * Present ONLY if the role is 'tool'. Links the result back to the specific execution request. */
+    readonly toolCallId?: string;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-profile-entity.entity.ts
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-profile-entity.entity.ts
 /**
  * Represents a stored AI provider configuration.
  */
@@ -148,32 +327,82 @@ export interface AiProfileEntity {
     readonly isActive: boolean;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-request.dto.ts
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-request.dto.ts
 import { AiMessageDto } from './ai-message.dto';
+import { AiToolDto } from './ai-tool.dto';
 
 /**
  * Standardized request payload to be sent to any AI adapter.
+ * Upgraded to fully support AI Agents through Tool Declarations.
  */
 export interface AiRequestDto {
     readonly messages: AiMessageDto[];
+
     /** * The specific model to use (e.g., 'gemini-1.5-pro'). If omitted, adapter uses the default. */
     readonly model?: string;
+
+    /** * Controls the randomness of the response. */
     readonly temperature?: number;
-    /** * Instructs the AI to return the response in JSON format if supported */
+
+    /** * Instructs the AI to return the response strictly in JSON format if supported. */
     readonly expectJson?: boolean;
+
+    /** * An array of tools (functions) that the AI agent is allowed to decide to call. */
+    readonly tools?: AiToolDto[];
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\ai-response.dto.ts
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-response.dto.ts
+import { AiToolCallDto } from './ai-tool-call.dto';
+
 /**
  * Standardized response payload returned by any AI adapter.
  */
 export interface AiResponseDto {
+    /** * The textual response from the AI. May be empty if the AI chose to only call a tool. */
     readonly content: string;
+
     readonly tokensUsed?: number;
+
     readonly providerId: string;
+
+    /** * Populated if the AI decided to call one or more tools instead of answering directly. */
+    readonly toolCalls?: AiToolCallDto[];
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\dtos\vault-entity.entity.ts
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-tool-call.dto.ts
+/**
+ * Represents an execution request from the AI Agent to run a specific tool.
+ */
+export interface AiToolCallDto {
+    /** * The unique identifier for this specific tool execution request */
+    readonly id: string;
+
+    /** * The exact name of the tool (function) the AI wants to execute */
+    readonly name: string;
+
+    /** * The parsed JSON arguments provided by the AI to pass into the function */
+    readonly arguments: Record<string, any>;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-tool.dto.ts
+/**
+ * Represents a callable function (tool) that the AI Agent can execute.
+ * This structure closely follows the JSON Schema specification standard.
+ */
+export interface AiToolDto {
+    /** * The strict, programmatic name of the function (e.g., 'getWeather', 'saveFlashcard') */
+    readonly name: string;
+
+    /** * A clear description of what the tool does, allowing the AI to decide when to use it */
+    readonly description: string;
+
+    /**
+     * A JSON Schema object defining the strict properties and types the function accepts.
+     */
+    readonly parameters: Record<string, any>;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\vault-entity.entity.ts
 /**
  * Represents the single master lock record in the local database.
  */
@@ -188,7 +417,7 @@ export interface VaultEntity {
     readonly vaultVersion: number;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\ai-adapter.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\ai-adapter.interface.ts
 import { Type } from '@angular/core';
 import { Observable } from 'rxjs';
 import { AiRequestDto } from '../dtos/ai-request.dto';
@@ -212,7 +441,7 @@ export interface AiAdapterConstructor extends Type<IAiAdapter> {
     readonly displayName: string;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\app-plugin.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\app-plugin.interface.ts
 import { IDbSchema } from '../../database/types/db-schema.type';
 import { CoreBus } from '../../mediator/core-bus.service';
 
@@ -231,7 +460,7 @@ export interface IAppPlugin {
     registerHandlers(coreBus: CoreBus): void;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\command.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\command.interface.ts
 import { IMessage } from './message.interface';
 
 /**
@@ -245,7 +474,7 @@ export interface ICommand extends IMessage {
     readonly isCommand: true;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\message-handler.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\message-handler.interface.ts
 import { IMessage } from './message.interface';
 
 /**
@@ -261,7 +490,7 @@ export interface IMessageHandler<TMessage extends IMessage, TResult> {
     handle(message: TMessage): Promise<TResult>;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\message.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\message.interface.ts
 /**
  * Base marker interface for all messages traversing the Core Bus.
  * In a type-safe mediator, the class reference itself acts as the unique identifier,
@@ -272,7 +501,7 @@ export interface IMessage {
     // Implementations will define their own specific payload properties.
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\middleware.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\middleware.interface.ts
 import { IMessage } from './message.interface';
 
 /**
@@ -288,7 +517,7 @@ export interface IMiddleware {
     handle<TResult>(message: IMessage, next: () => Promise<TResult>): Promise<TResult>;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\contracts\interfaces\query.interface.ts
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\query.interface.ts
 import { IMessage } from './message.interface';
 
 /**
@@ -303,7 +532,7 @@ export interface IQuery<TResult> extends IMessage {
     readonly isQuery: true;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\repositories\ai-profile-repository.repository.ts
+Relative Path: \projects\arena-core\src\lib\database\repositories\ai-profile-repository.repository.ts
 import { Injectable } from '@angular/core';
 import { BaseRepository } from '../base-repository.class';
 import { CoreDatabaseService } from '../core-database.service';
@@ -338,7 +567,7 @@ export class AiProfileRepository extends BaseRepository<AiProfileEntity, string>
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\repositories\vault-repository.repository.ts
+Relative Path: \projects\arena-core\src\lib\database\repositories\vault-repository.repository.ts
 import { Injectable } from '@angular/core';
 import { BaseRepository } from '../base-repository.class';
 import { CoreDatabaseService } from '../core-database.service';
@@ -360,7 +589,7 @@ export class VaultRepository extends BaseRepository<VaultEntity, number> {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\types\db-schema.type.ts
+Relative Path: \projects\arena-core\src\lib\database\types\db-schema.type.ts
 /**
  * Represents a dynamic table schema to be injected into the Core Database (Dexie).
  * This allows applications to define their own isolated tables.
@@ -377,7 +606,7 @@ export interface IDbSchema {
     readonly schemaDefinition: string;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\base-repository.class.ts
+Relative Path: \projects\arena-core\src\lib\database\base-repository.class.ts
 import Dexie, { Table } from 'dexie';
 import { CoreDatabaseService } from './core-database.service';
 
@@ -424,7 +653,7 @@ export abstract class BaseRepository<T, TKey> {
     }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\core-database.service.ts
+Relative Path: \projects\arena-core\src\lib\database\core-database.service.ts
 import { Injectable } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
@@ -474,7 +703,7 @@ export class CoreDatabaseService extends Dexie {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\database\schema-manager.service.ts
+Relative Path: \projects\arena-core\src\lib\database\schema-manager.service.ts
 import { Injectable } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
@@ -518,7 +747,14 @@ export class SchemaManagerService {
       combinedSchema[schema.tableName] = schema.schemaDefinition;
     });
 
-    const currentSchemaString = JSON.stringify(combinedSchema);
+    // Sort keys alphabetically to guarantee deterministic JSON.stringify output
+    const sortedKeys = Object.keys(combinedSchema).sort();
+    const sortedSchema: Record<string, string> = {};
+    sortedKeys.forEach(key => {
+      sortedSchema[key] = combinedSchema[key];
+    });
+
+    const currentSchemaString = JSON.stringify(sortedSchema);
     const metaRecord = await this.metaDb.metaStore.get(1);
 
     let currentVersion = metaRecord?.version || 1;
@@ -537,24 +773,26 @@ export class SchemaManagerService {
 
     return {
       version: currentVersion,
-      dexieSchema: combinedSchema
+      dexieSchema: sortedSchema
     };
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\engine\core-engine.service.ts
+Relative Path: \projects\arena-core\src\lib\engine\core-engine.service.ts
 import { Injectable, signal, WritableSignal } from '@angular/core';
 import { IAppPlugin } from '../contracts/interfaces/app-plugin.interface';
+import { AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
 import { CoreDatabaseService } from '../database/core-database.service';
 import { CoreBus } from '../mediator/core-bus.service';
 import { SecurityService } from '../security/security.service';
 import { ProcessMonitorMiddleware } from '../monitor/middlewares/process-monitor.middleware';
 import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.middleware';
+import { AiRegistryService } from '../ai/ai-registry.service';
 
 /**
  * The Main Kernel of the Framework.
  * Orchestrates the full boot sequence: Database evolution, Security verification, 
- * Middleware mounting, and Plugin handler registration.
+ * Middleware mounting, Plugin handler registration, and AI Factory setup.
  */
 @Injectable({
   providedIn: 'root'
@@ -568,14 +806,16 @@ export class CoreEngineService {
     private readonly coreBus: CoreBus,
     private readonly securityService: SecurityService,
     private readonly securityGuard: SecurityGuardMiddleware,
-    private readonly processMonitor: ProcessMonitorMiddleware
+    private readonly processMonitor: ProcessMonitorMiddleware,
+    private readonly aiRegistry: AiRegistryService
   ) { }
 
   /**
-   * Bootstraps the OS with the provided applications.
+   * Bootstraps the OS with the provided applications and AI Adapters.
    * @param plugins Applications (like LanguageApp or ResumeApp) to install.
+   * @param aiAdapters Array of AI Factory classes decided by the App Developer.
    */
-  async boot(plugins: IAppPlugin[]): Promise<void> {
+  async boot(plugins: IAppPlugin[], aiAdapters: AiAdapterConstructor[] = []): Promise<void> {
     if (this.isBooted()) {
       console.warn('[Core Engine] System is already booted. Ignoring duplicate boot request.');
       return;
@@ -586,31 +826,35 @@ export class CoreEngineService {
 
       // PHASE 1: Database Initialization
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
-      // We pass empty array for coreSchemas currently, as OS tables are hardcoded in repos
       await this.databaseEngine.initializeDatabase(pluginSchemas, []);
       console.log('[Core Engine] Phase 1: Database initialized.');
 
-      // PHASE 2: Mount Global Middlewares on the Core Bus
+      // PHASE 2: AI Adapter Registration (BYOA - Bring Your Own Adapter)
+      aiAdapters.forEach(adapterClass => {
+        this.aiRegistry.registerAdapter(adapterClass);
+      });
+      console.log(`[Core Engine] Phase 2: Registered ${aiAdapters.length} AI Adapters.`);
+
+      // PHASE 3: Mount Global Middlewares on the Core Bus
       this.coreBus.useMiddleware(this.processMonitor);
       this.coreBus.useMiddleware(this.securityGuard);
-      console.log('[Core Engine] Phase 2: System Monitor and Security Guard mounted.');
+      console.log('[Core Engine] Phase 3: System Monitor and Security Guard mounted.');
 
-      // PHASE 3: Plugin Handler Registration
+      // PHASE 4: Plugin Handler Registration
       plugins.forEach(plugin => {
         plugin.registerHandlers(this.coreBus);
         console.log(`[Core Engine] Registered handlers for plugin: ${plugin.appId}`);
       });
-      console.log('[Core Engine] Phase 3: All plugin handlers mounted.');
+      console.log('[Core Engine] Phase 4: All plugin handlers mounted.');
 
-      // PHASE 4: Security Status Check
-      // Note: We don't block the boot if locked, we just log it. The SecurityGuard will block specific commands.
+      // PHASE 5: Security Status Check
       if (!this.securityService.isVaultUnlocked()) {
-        console.warn('[Core Engine] Phase 4: System is running, but Vault is LOCKED.');
+        console.warn('[Core Engine] Phase 5: System is running, but Vault is LOCKED.');
       } else {
-        console.log('[Core Engine] Phase 4: Security verified. Vault is unlocked.');
+        console.log('[Core Engine] Phase 5: Security verified. Vault is unlocked.');
       }
 
-      // PHASE 5: System Online
+      // PHASE 6: System Online
       this.isBooted.set(true);
       console.log('[Core Engine] Framework is fully operational.');
 
@@ -622,7 +866,7 @@ export class CoreEngineService {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\mediator\core-bus.service.ts
+Relative Path: \projects\arena-core\src\lib\mediator\core-bus.service.ts
 import { Injectable, Injector, Type } from '@angular/core';
 import { IMessage } from '../contracts/interfaces/message.interface';
 import { IMessageHandler } from '../contracts/interfaces/message-handler.interface';
@@ -696,7 +940,7 @@ export class CoreBus {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\monitor\middlewares\process-monitor.middleware.ts
+Relative Path: \projects\arena-core\src\lib\monitor\middlewares\process-monitor.middleware.ts
 import { Injectable } from '@angular/core';
 import { IMiddleware } from '../../contracts/interfaces/middleware.interface';
 import { IMessage } from '../../contracts/interfaces/message.interface';
@@ -730,7 +974,7 @@ export class ProcessMonitorMiddleware implements IMiddleware {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\monitor\system-monitor.service.ts
+Relative Path: \projects\arena-core\src\lib\monitor\system-monitor.service.ts
 import { Injectable, signal, WritableSignal } from '@angular/core';
 
 /**
@@ -782,7 +1026,7 @@ export class SystemMonitorService {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\exceptions\vault-locked.exception.ts
+Relative Path: \projects\arena-core\src\lib\security\exceptions\vault-locked.exception.ts
 export class VaultLockedException extends Error {
     constructor(actionName: string) {
         super(`[Security Guard] Access Denied. Cannot execute action '${actionName}' while the vault is locked.`);
@@ -791,7 +1035,7 @@ export class VaultLockedException extends Error {
     }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\middlewares\security-guard.middleware.ts
+Relative Path: \projects\arena-core\src\lib\security\middlewares\security-guard.middleware.ts
 import { Injectable } from '@angular/core';
 import { IMiddleware } from '../../contracts/interfaces/middleware.interface';
 import { IMessage } from '../../contracts/interfaces/message.interface';
@@ -819,12 +1063,12 @@ export class SecurityGuardMiddleware implements IMiddleware {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\crypto.service.ts
+Relative Path: \projects\arena-core\src\lib\security\crypto.service.ts
 import { Injectable } from '@angular/core';
 
 /**
  * The Cryptographic Engine of the OS.
- * Implements AES-256-GCM for encryption and PBKDF2 for key derivation.
+ * Implements AES-256-GCM for encryption and PBKDF2 for key derivation AND hashing.
  * Operates purely on the browser's native Web Crypto API.
  */
 @Injectable({
@@ -842,8 +1086,27 @@ export class CryptoService {
 
   async hashPassword(password: string, saltHex: string): Promise<string> {
     const encoder = new TextEncoder();
-    const data = encoder.encode(password + saltHex);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(password),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits']
+    );
+
+    const saltBuffer = this.hexToBuffer(saltHex);
+
+    const hashBuffer = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: saltBuffer,
+        iterations: this.ITERATIONS,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      256
+    );
+
     return this.bufferToHex(hashBuffer);
   }
 
@@ -912,7 +1175,7 @@ export class CryptoService {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\projects\arena-core\src\lib\security\security.service.ts
+Relative Path: \projects\arena-core\src\lib\security\security.service.ts
 import { Injectable, signal, WritableSignal } from '@angular/core';
 import { CryptoService } from './crypto.service';
 import { VaultRepository } from '../database/repositories/vault-repository.repository';
@@ -979,23 +1242,166 @@ export class SecurityService {
   }
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\arena-core.ts
-import { Component } from '@angular/core';
+Relative Path: \projects\arena-core\src\lib\system\system-portability.service.ts
+import { Injectable } from '@angular/core';
+import { CoreDatabaseService } from '../database/core-database.service';
+import { SecurityService } from '../security/security.service';
 
-@Component({
-  selector: 'lib-arena-core',
-  imports: [],
-  template: ` <p>arena-core works!</p> `,
-  styles: ``,
+/**
+ * Manages the import, export, and destruction of the entire OS ecosystem.
+ * Enables local-first portability ensuring the user owns their data.
+ */
+@Injectable({
+  providedIn: 'root'
 })
-export class ArenaCore {}
+export class SystemPortabilityService {
 
+  constructor(
+    private readonly dbEngine: CoreDatabaseService,
+    private readonly securityService: SecurityService
+  ) { }
+
+  /**
+   * Exports the entire database (OS tables + Plugin tables) into a serialized JSON string.
+   * @returns A JSON string representing the entire application state.
+   */
+  async exportEcosystem(): Promise<string> {
+    if (!this.securityService.isVaultUnlocked()) {
+      throw new Error('[Portability] Cannot export data while the vault is locked.');
+    }
+
+    const exportData: Record<string, any[]> = {};
+    const tables = this.dbEngine.tables;
+
+    for (const table of tables) {
+      exportData[table.name] = await table.toArray();
+    }
+
+    console.log(`[Portability] Successfully exported ${tables.length} tables.`);
+    return JSON.stringify(exportData);
+  }
+
+  /**
+   * Imports a previously exported ecosystem state, completely overwriting current data.
+   * Wrapped in a transaction to prevent data corruption if the import fails midway.
+   * @param jsonString The JSON string generated by exportEcosystem().
+   */
+  async importEcosystem(jsonString: string): Promise<void> {
+    if (!this.securityService.isVaultUnlocked()) {
+      throw new Error('[Portability] Cannot import data while the vault is locked.');
+    }
+
+    try {
+      const parsedData: Record<string, any[]> = JSON.parse(jsonString);
+      const tables = this.dbEngine.tables;
+
+      await this.dbEngine.transaction('rw', tables, async () => {
+        for (const table of tables) {
+          if (parsedData[table.name]) {
+            await table.clear();
+            await table.bulkPut(parsedData[table.name]);
+          }
+        }
+      });
+
+      console.log('[Portability] Ecosystem imported and restored successfully.');
+    } catch (error) {
+      console.error('[Portability] Failed to import ecosystem. Data might be corrupted.', error);
+      throw new Error('[Portability] Import failed. Invalid file format or database error.');
+    }
+  }
+
+  /**
+   * Clears all plugin-generated data but retains OS security and AI configurations.
+   * The user remains logged in, but their app-specific progress is wiped.
+   */
+  async softReset(): Promise<void> {
+    if (!this.securityService.isVaultUnlocked()) {
+      throw new Error('[Portability] Cannot perform a soft reset while the vault is locked.');
+    }
+
+    // Filter out OS mandatory tables to strictly wipe plugin data only
+    const tablesToClear = this.dbEngine.tables.filter(t => !t.name.startsWith('os_'));
+
+    await this.dbEngine.transaction('rw', tablesToClear, async () => {
+      for (const table of tablesToClear) {
+        await table.clear();
+      }
+    });
+
+    console.log('[Portability] Soft reset complete. Plugin data wiped. OS state retained.');
+  }
+
+  /**
+   * The Nuclear Option.
+   * Destroys all databases (Main and Meta), locks the vault, and reloads the application.
+   * Returns the framework to its absolute initial install state.
+   */
+  async factoryReset(): Promise<void> {
+    console.warn('[Portability] INITIATING FACTORY RESET...');
+
+    // 1. Lock the security gatekeeper and purge memory
+    this.securityService.lockVault();
+
+    try {
+      // 2. Close and delete the main framework database
+      if (this.dbEngine.isOpen()) {
+        this.dbEngine.close();
+      }
+      await this.dbEngine.delete();
+
+      // 3. Delete the isolated Meta Database directly via native IndexedDB API
+      await new Promise<void>((resolve, reject) => {
+        const req = indexedDB.deleteDatabase('ArenaMetaDb');
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => resolve(); // Proceed even if slightly blocked
+      });
+
+      // 4. Clear any potential legacy local storage
+      localStorage.clear();
+      sessionStorage.clear();
+
+      console.log('[Portability] Factory reset complete. Reloading environment...');
+
+      // 5. Force reload to re-initialize the empty OS
+      window.location.reload();
+    } catch (error) {
+      console.error('[Portability] Critical error during factory reset:', error);
+      throw error;
+    }
+  }
+}
 ------------------------------
 Relative Path: \projects\arena-core\src\public-api.ts
 /*
  * Public API Surface of arena-core
  */
 
-export * from './lib/arena-core';
+// 1. Core Engine & Ecosystem
+export * from './lib/engine/core-engine.service';
+export * from './lib/contracts/interfaces/app-plugin.interface';
+export * from './lib/system/system-portability.service';
+export * from './lib/monitor/system-monitor.service';
 
+// 2. Mediator & Database
+export * from './lib/mediator/core-bus.service';
+export * from './lib/contracts/interfaces/message.interface';
+export * from './lib/contracts/interfaces/command.interface';
+export * from './lib/contracts/interfaces/query.interface';
+export * from './lib/contracts/interfaces/message-handler.interface';
+export * from './lib/database/base-repository.class';
+
+// 3. AI Gateway & Contracts
+export * from './lib/ai/ai-gateway.service';
+export * from './lib/ai/adapters/google-gemini.adapter';
+export * from './lib/contracts/interfaces/ai-adapter.interface';
+export * from './lib/contracts/dtos/ai-request.dto';
+export * from './lib/contracts/dtos/ai-response.dto';
+export * from './lib/contracts/dtos/ai-message.dto';
+export * from './lib/contracts/dtos/ai-tool.dto';
+export * from './lib/contracts/dtos/ai-tool-call.dto';
+
+// 4. Security
+export * from './lib/security/security.service';
 ------------------------------
