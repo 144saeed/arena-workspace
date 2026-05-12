@@ -23,21 +23,22 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   public static readonly capabilities: AiCapabilitiesDto = {
     supportsStreaming: true,
     supportsTools: true,
-    supportsVision: false,
+    supportsVision: true, // FIX: Officially enabled vision support
     supportsJsonMode: true
   };
 
   private readonly BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   validateKey(apiKey: string): Observable<boolean> {
+    // SECURITY FIX: Send API key via headers, not URL, to prevent logging leaks
     return from(
-      fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
+      fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
     ).pipe(map(response => response.status === 200));
   }
 
   fetchModels(apiKey: string): Observable<string[]> {
     return from(
-      fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
+      fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
           if (!res.ok) throw new Error('[Gemini Adapter] Failed to fetch models.');
           return res.json();
@@ -52,13 +53,16 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   }
 
   generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
-    const endpoint = `${this.BASE_URL}/${request.model}:generateContent?key=${apiKey}`;
+    const endpoint = `${this.BASE_URL}/${request.model}:generateContent`;
     const payload = this.mapRequestToGeminiFormat(request);
 
     return from(
       fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey // SECURITY FIX
+        },
         body: JSON.stringify(payload),
         signal: abortSignal
       }).then(async res => {
@@ -73,18 +77,20 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
   generateStream(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
     return new Observable<AiEventDto>(subscriber => {
-      const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+      const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse`;
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
 
-      // FIX: Bind the external generic abortSignal to the internal native abortController
       if (abortSignal) {
         abortSignal.addEventListener('abort', () => abortController.abort());
       }
 
       fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey // SECURITY FIX
+        },
         body: JSON.stringify(payload),
         signal: abortController.signal
       }).then(async response => {
@@ -108,7 +114,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
-              const dataStr = line.replace('data: ', '').trim();
+              // ARCHITECTURE FIX: Use slice instead of replace to prevent double-data keyword bugs
+              const dataStr = line.slice('data: '.length).trim();
               if (!dataStr) continue;
 
               try {
@@ -158,7 +165,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
       contents: [],
-      generationConfig: { temperature: request.temperature || 0.7 }
+      generationConfig: { temperature: request.temperature ?? 0.7 }
     };
 
     const systemMessages = request.messages.filter(m => m.role === 'system');

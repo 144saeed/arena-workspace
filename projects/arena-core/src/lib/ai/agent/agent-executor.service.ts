@@ -32,6 +32,8 @@ export class AgentExecutorService {
     abortSignal?: AbortSignal
   ): Promise<AiResponseDto> {
 
+    // ARCHITECTURE FIX: Use strict functional spreading to preserve DTO readonly constraints.
+    // Never mutate currentRequest.tools directly.
     let currentRequest: AiRequestDto = {
       ...request,
       tools: (request.tools && request.tools.length > 0)
@@ -69,6 +71,7 @@ export class AgentExecutorService {
           parts: assistantParts
         };
 
+        // Re-assigning a completely new object to respect the 'readonly' array contract
         currentRequest = {
           ...currentRequest,
           messages: [...currentRequest.messages, aiMessage]
@@ -93,7 +96,7 @@ export class AgentExecutorService {
 
           toolResultsParts.push({
             type: 'tool-result',
-            toolCallId: toolCall.id, // CRITICAL FIX: Use the adapter-generated UUID to prevent execution collisions
+            toolCallId: toolCall.id,
             toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
           });
 
@@ -108,6 +111,7 @@ export class AgentExecutorService {
           parts: toolResultsParts
         };
 
+        // Re-assigning again to respect readonly constraint
         currentRequest = {
           ...currentRequest,
           messages: [...currentRequest.messages, toolMessage]

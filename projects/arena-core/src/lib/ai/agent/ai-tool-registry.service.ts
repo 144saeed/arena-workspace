@@ -2,6 +2,7 @@ import { Injectable, Injector } from '@angular/core';
 import { AiToolDto } from '../../contracts/dtos/ai-tool.dto';
 import { StructuredToolResultDto } from '../../contracts/dtos/structured-tool-result.dto';
 import { IToolExecutionContext } from '../../contracts/interfaces/tool-execution-context.interface';
+import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 export type ToolHandler = (args: Record<string, any>, context: IToolExecutionContext) => Promise<StructuredToolResultDto>;
 
@@ -21,7 +22,13 @@ export class AiToolRegistryService {
 
   registerTool(definition: AiToolDto, handler: ToolHandler): void {
     if (this.tools.has(definition.name)) {
-      console.warn(`[Tool Registry] Overwriting existing tool registration for: ${definition.name}`);
+      // SECURITY/ARCHITECTURE FIX: Throw a hard error instead of a silent warning 
+      // to prevent unpredictable agent behavior from tool name collisions.
+      throw new FrameworkError(
+        'TOOL_NAME_COLLISION',
+        `Critical Error: A tool with the name '${definition.name}' is already registered. Tool names must be globally unique across all plugins.`,
+        false
+      );
     }
     this.tools.set(definition.name, { definition, handler });
     console.log(`[Tool Registry] Tool registered successfully: ${definition.name}`);
@@ -47,10 +54,10 @@ export class AiToolRegistryService {
       };
       return await tool.handler(args, context);
     } catch (error) {
-      console.error(`[Tool Registry] Tool '${name}' threw an unhandled exception:`, error);
+      console.error(`[Tool Registry] Tool '${name}' threw an unhandled exception.`);
       return {
         status: 'fatal_error',
-        errorMessage: String(error)
+        errorMessage: 'An internal error occurred while executing this tool.' // Prevent leaking stack traces to the AI
       };
     }
   }

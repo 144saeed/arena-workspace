@@ -24,21 +24,22 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   public static readonly capabilities: AiCapabilitiesDto = {
     supportsStreaming: true,
     supportsTools: true,
-    supportsVision: false,
+    supportsVision: true, // FIX: Officially enabled vision support
     supportsJsonMode: true
   };
 
   private readonly BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   validateKey(apiKey: string): Observable<boolean> {
+    // SECURITY FIX: Send API key via headers, not URL, to prevent logging leaks
     return from(
-      fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
+      fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
     ).pipe(map(response => response.status === 200));
   }
 
   fetchModels(apiKey: string): Observable<string[]> {
     return from(
-      fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
+      fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
           if (!res.ok) throw new Error('[Gemini Adapter] Failed to fetch models.');
           return res.json();
@@ -53,13 +54,16 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   }
 
   generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
-    const endpoint = `${this.BASE_URL}/${request.model}:generateContent?key=${apiKey}`;
+    const endpoint = `${this.BASE_URL}/${request.model}:generateContent`;
     const payload = this.mapRequestToGeminiFormat(request);
 
     return from(
       fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey // SECURITY FIX
+        },
         body: JSON.stringify(payload),
         signal: abortSignal
       }).then(async res => {
@@ -74,18 +78,20 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
   generateStream(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
     return new Observable<AiEventDto>(subscriber => {
-      const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+      const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse`;
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
 
-      // FIX: Bind the external generic abortSignal to the internal native abortController
       if (abortSignal) {
         abortSignal.addEventListener('abort', () => abortController.abort());
       }
 
       fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey // SECURITY FIX
+        },
         body: JSON.stringify(payload),
         signal: abortController.signal
       }).then(async response => {
@@ -109,7 +115,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
-              const dataStr = line.replace('data: ', '').trim();
+              // ARCHITECTURE FIX: Use slice instead of replace to prevent double-data keyword bugs
+              const dataStr = line.slice('data: '.length).trim();
               if (!dataStr) continue;
 
               try {
@@ -159,7 +166,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
       contents: [],
-      generationConfig: { temperature: request.temperature || 0.7 }
+      generationConfig: { temperature: request.temperature ?? 0.7 }
     };
 
     const systemMessages = request.messages.filter(m => m.role === 'system');
@@ -282,6 +289,8 @@ export class AgentExecutorService {
     abortSignal?: AbortSignal
   ): Promise<AiResponseDto> {
 
+    // ARCHITECTURE FIX: Use strict functional spreading to preserve DTO readonly constraints.
+    // Never mutate currentRequest.tools directly.
     let currentRequest: AiRequestDto = {
       ...request,
       tools: (request.tools && request.tools.length > 0)
@@ -319,6 +328,7 @@ export class AgentExecutorService {
           parts: assistantParts
         };
 
+        // Re-assigning a completely new object to respect the 'readonly' array contract
         currentRequest = {
           ...currentRequest,
           messages: [...currentRequest.messages, aiMessage]
@@ -343,7 +353,7 @@ export class AgentExecutorService {
 
           toolResultsParts.push({
             type: 'tool-result',
-            toolCallId: toolCall.id, // CRITICAL FIX: Use the adapter-generated UUID to prevent execution collisions
+            toolCallId: toolCall.id,
             toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
           });
 
@@ -358,6 +368,7 @@ export class AgentExecutorService {
           parts: toolResultsParts
         };
 
+        // Re-assigning again to respect readonly constraint
         currentRequest = {
           ...currentRequest,
           messages: [...currentRequest.messages, toolMessage]
@@ -383,6 +394,7 @@ import { Injectable, Injector } from '@angular/core';
 import { AiToolDto } from '../../contracts/dtos/ai-tool.dto';
 import { StructuredToolResultDto } from '../../contracts/dtos/structured-tool-result.dto';
 import { IToolExecutionContext } from '../../contracts/interfaces/tool-execution-context.interface';
+import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 export type ToolHandler = (args: Record<string, any>, context: IToolExecutionContext) => Promise<StructuredToolResultDto>;
 
@@ -402,7 +414,13 @@ export class AiToolRegistryService {
 
   registerTool(definition: AiToolDto, handler: ToolHandler): void {
     if (this.tools.has(definition.name)) {
-      console.warn(`[Tool Registry] Overwriting existing tool registration for: ${definition.name}`);
+      // SECURITY/ARCHITECTURE FIX: Throw a hard error instead of a silent warning 
+      // to prevent unpredictable agent behavior from tool name collisions.
+      throw new FrameworkError(
+        'TOOL_NAME_COLLISION',
+        `Critical Error: A tool with the name '${definition.name}' is already registered. Tool names must be globally unique across all plugins.`,
+        false
+      );
     }
     this.tools.set(definition.name, { definition, handler });
     console.log(`[Tool Registry] Tool registered successfully: ${definition.name}`);
@@ -428,10 +446,10 @@ export class AiToolRegistryService {
       };
       return await tool.handler(args, context);
     } catch (error) {
-      console.error(`[Tool Registry] Tool '${name}' threw an unhandled exception:`, error);
+      console.error(`[Tool Registry] Tool '${name}' threw an unhandled exception.`);
       return {
         status: 'fatal_error',
-        errorMessage: String(error)
+        errorMessage: 'An internal error occurred while executing this tool.' // Prevent leaking stack traces to the AI
       };
     }
   }
@@ -1234,7 +1252,7 @@ export class SchemaManagerService {
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\engine\core-engine.service.ts
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { IAppPlugin } from '../contracts/interfaces/app-plugin.interface';
 import { AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
 import { CoreDatabaseService } from '../database/core-database.service';
@@ -1255,7 +1273,9 @@ import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant'
 })
 export class CoreEngineService {
 
-  public readonly isBooted: WritableSignal<boolean> = signal(false);
+  // SECURITY FIX: Encapsulate boot state
+  private readonly _isBooted = signal<boolean>(false);
+  public readonly isBooted = this._isBooted.asReadonly();
 
   constructor(
     private readonly databaseEngine: CoreDatabaseService,
@@ -1266,11 +1286,6 @@ export class CoreEngineService {
     private readonly aiRegistry: AiRegistryService
   ) { }
 
-  /**
-   * Bootstraps the OS with the provided applications and AI Adapters.
-   * @param plugins Applications (like LanguageApp or ResumeApp) to install.
-   * @param aiAdapters Array of AI Factory classes decided by the App Developer.
-   */
   async boot(plugins: IAppPlugin[], aiAdapters: AiAdapterConstructor[] = []): Promise<void> {
     if (this.isBooted()) {
       console.warn('[Core Engine] System is already booted. Ignoring duplicate boot request.');
@@ -1280,44 +1295,37 @@ export class CoreEngineService {
     try {
       console.log('[Core Engine] Boot sequence started...');
 
-      // PHASE 1: Database Initialization
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
-      // Injecting OS schemas dynamically prevents Ghost Tables
       await this.databaseEngine.initializeDatabase(pluginSchemas, OS_MANDATORY_SCHEMAS);
       console.log('[Core Engine] Phase 1: Database initialized with core and plugin schemas.');
 
-      // PHASE 2: AI Adapter Registration (BYOA - Bring Your Own Adapter)
       aiAdapters.forEach(adapterClass => {
         this.aiRegistry.registerAdapter(adapterClass);
       });
       console.log(`[Core Engine] Phase 2: Registered ${aiAdapters.length} AI Adapters.`);
 
-      // PHASE 3: Mount Global Middlewares on the Core Bus
       this.coreBus.useMiddleware(this.processMonitor);
       this.coreBus.useMiddleware(this.securityGuard);
       console.log('[Core Engine] Phase 3: System Monitor and Security Guard mounted.');
 
-      // PHASE 4: Plugin Handler Registration
       plugins.forEach(plugin => {
         plugin.registerHandlers(this.coreBus);
         console.log(`[Core Engine] Registered handlers for plugin: ${plugin.appId}`);
       });
       console.log('[Core Engine] Phase 4: All plugin handlers mounted.');
 
-      // PHASE 5: Security Status Check
       if (!this.securityService.isVaultUnlocked()) {
         console.warn('[Core Engine] Phase 5: System is running, but Vault is LOCKED.');
       } else {
         console.log('[Core Engine] Phase 5: Security verified. Vault is unlocked.');
       }
 
-      // PHASE 6: System Online
-      this.isBooted.set(true);
+      this._isBooted.set(true);
       console.log('[Core Engine] Framework is fully operational.');
 
     } catch (error) {
       console.error('[Core Engine] Critical Boot Failure:', error);
-      this.isBooted.set(false);
+      this._isBooted.set(false);
       throw error;
     }
   }
@@ -1453,7 +1461,7 @@ export class ProcessMonitorMiddleware implements IMiddleware {
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\monitor\ai-connection-monitor.service.ts
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 
 export type ConnectionState = 'Connected' | 'Disconnected' | 'InvalidKey' | 'Unknown';
 
@@ -1472,36 +1480,28 @@ export interface ProfileConnectionState {
 })
 export class AiConnectionMonitorService {
 
-  /**
-   * A reactive map of profile connections.
-   * Key: profileId, Value: ProfileConnectionState
-   */
-  public readonly connectionStates: WritableSignal<Map<string, ProfileConnectionState>> = signal(new Map());
+  // SECURITY FIX: Expose map as readonly to prevent external component mutations
+  private readonly _connectionStates = signal<Map<string, ProfileConnectionState>>(new Map());
+  public readonly connectionStates = this._connectionStates.asReadonly();
 
-  /**
-   * Updates the connection status for a specific AI Profile.
-   */
   updateState(profileId: string, state: ConnectionState): void {
-    const currentMap = new Map(this.connectionStates());
+    const currentMap = new Map(this._connectionStates());
     currentMap.set(profileId, {
       profileId,
       state,
       lastChecked: new Date()
     });
-    this.connectionStates.set(currentMap);
+    this._connectionStates.set(currentMap);
   }
 
-  /**
-   * Retrieves the current connection state of a profile.
-   */
   getState(profileId: string): ConnectionState {
-    const stateObj = this.connectionStates().get(profileId);
+    const stateObj = this._connectionStates().get(profileId);
     return stateObj ? stateObj.state : 'Unknown';
   }
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\monitor\system-monitor.service.ts
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 
 /**
  * The Central Nervous System of the framework.
@@ -1513,42 +1513,31 @@ import { Injectable, signal, WritableSignal } from '@angular/core';
 })
 export class SystemMonitorService {
 
-  /** Represents if the Core Bus is currently actively processing a request */
-  public readonly isProcessing: WritableSignal<boolean> = signal(false);
+  // SECURITY FIX: Expose signals as readonly to prevent unauthorized mutations
+  private readonly _isProcessing = signal<boolean>(false);
+  public readonly isProcessing = this._isProcessing.asReadonly();
 
-  /** Holds the latest global error message, if any */
-  public readonly latestError: WritableSignal<string | null> = signal(null);
+  private readonly _latestError = signal<string | null>(null);
+  public readonly latestError = this._latestError.asReadonly();
 
-  /**
-   * Marks the system as busy and clears previous errors.
-   */
   public startProcess(): void {
-    this.isProcessing.set(true);
-    this.latestError.set(null);
+    this._isProcessing.set(true);
+    this._latestError.set(null);
   }
 
-  /**
-   * Marks the system as idle.
-   */
   public endProcess(): void {
-    this.isProcessing.set(false);
+    this._isProcessing.set(false);
   }
 
-  /**
-   * Broadcasts an error to the entire application.
-   * @param error The error object or message thrown during a process.
-   */
   public reportError(error: unknown): void {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('[System Monitor] Critical Error Intercepted:', errorMessage);
-    this.latestError.set(errorMessage);
+    // SECURITY FIX: Abstracted error logging to prevent leaking stack traces or sensitive data
+    console.warn('[System Monitor] An internal error occurred and was captured by the monitor.');
+    this._latestError.set(errorMessage);
   }
 
-  /**
-   * Manually clears the error state.
-   */
   public clearError(): void {
-    this.latestError.set(null);
+    this._latestError.set(null);
   }
 }
 ------------------------------
@@ -1602,12 +1591,26 @@ import { Injectable } from '@angular/core';
 })
 export class CryptoService {
 
-  private readonly ITERATIONS = 100000;
+  // SECURITY FIX: Upgraded to OWASP 2024 recommendations
+  private readonly ITERATIONS = 600000;
+  private readonly SALT_SIZE_BYTES = 32;
   private readonly ENCRYPTION_ALGO = 'AES-GCM';
 
   generateSalt(): string {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const salt = crypto.getRandomValues(new Uint8Array(this.SALT_SIZE_BYTES));
     return this.bufferToHex(salt.buffer);
+  }
+
+  /**
+   * Performs a constant-time string comparison to prevent cryptographic timing attacks.
+   */
+  constantTimeCompare(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let result = 0;
+    for (let i = 0; i < a.length; i++) {
+      result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+    return result === 0;
   }
 
   async hashPassword(password: string, saltHex: string): Promise<string> {
@@ -1652,7 +1655,7 @@ export class CryptoService {
       { name: 'PBKDF2', salt: saltBuffer, iterations: this.ITERATIONS, hash: 'SHA-256' },
       keyMaterial,
       { name: this.ENCRYPTION_ALGO, length: 256 },
-      false, // Key becomes non-extractable (stays strictly in RAM)
+      false,
       ['encrypt', 'decrypt']
     );
   }
@@ -1702,7 +1705,7 @@ export class CryptoService {
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\security\security.service.ts
-import { Injectable, signal, WritableSignal } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { CryptoService } from './crypto.service';
 import { VaultRepository } from '../database/repositories/vault-repository.repository';
 
@@ -1715,7 +1718,10 @@ import { VaultRepository } from '../database/repositories/vault-repository.repos
 })
 export class SecurityService {
 
-  public readonly isVaultUnlocked: WritableSignal<boolean> = signal(false);
+  // SECURITY FIX: Prevent external tampering by exposing only a readonly signal
+  private readonly _isVaultUnlocked = signal<boolean>(false);
+  public readonly isVaultUnlocked = this._isVaultUnlocked.asReadonly();
+
   private sessionMasterKey: CryptoKey | null = null;
 
   constructor(
@@ -1732,7 +1738,7 @@ export class SecurityService {
 
     await this.vaultRepo.create({ id: 1, salt, hashedPassword, vaultVersion: 1 });
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
-    this.isVaultUnlocked.set(true);
+    this._isVaultUnlocked.set(true);
 
     console.log('[Security] Vault securely initialized and unlocked.');
   }
@@ -1742,13 +1748,15 @@ export class SecurityService {
     if (!vault) throw new Error('[Security] No vault found. Setup required.');
 
     const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
-    if (loginHash !== vault.hashedPassword) {
+
+    // SECURITY FIX: Mitigate timing attacks during password validation
+    if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
       console.warn('[Security] Invalid master password attempt.');
       return false;
     }
 
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
-    this.isVaultUnlocked.set(true);
+    this._isVaultUnlocked.set(true);
 
     console.log('[Security] Vault unlocked successfully.');
     return true;
@@ -1756,7 +1764,7 @@ export class SecurityService {
 
   lockVault(): void {
     this.sessionMasterKey = null;
-    this.isVaultUnlocked.set(false);
+    this._isVaultUnlocked.set(false);
     console.log('[Security] Vault locked and RAM purged.');
   }
 
