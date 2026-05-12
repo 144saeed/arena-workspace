@@ -11,13 +11,13 @@ export class SystemMonitorService {
   private readonly _latestError = signal<string | null>(null);
   public readonly latestError = this._latestError.asReadonly();
 
-  // ARCHITECTURE FIX: Use a counter to manage concurrent processing requests
   private activeProcesses = 0;
 
   public startProcess(): void {
     this.activeProcesses++;
     this._isProcessing.set(true);
-    this._latestError.set(null);
+    // ARCHITECTURE FIX: Do NOT clear _latestError here to prevent hiding existing 
+    // unread errors from the UI during concurrent requests.
   }
 
   public endProcess(): void {

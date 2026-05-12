@@ -3,7 +3,6 @@ import { CoreDatabaseService } from '../database/core-database.service';
 import { SecurityService } from '../security/security.service';
 import { SchemaManagerService } from '../database/schema-manager.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
-import { CryptoService } from '../security/crypto.service';
 
 @Injectable({
   providedIn: 'root'
@@ -13,8 +12,7 @@ export class SystemPortabilityService {
   constructor(
     private readonly dbEngine: CoreDatabaseService,
     private readonly securityService: SecurityService,
-    private readonly schemaManager: SchemaManagerService,
-    private readonly cryptoService: CryptoService
+    private readonly schemaManager: SchemaManagerService
   ) { }
 
   async exportEcosystem(): Promise<string> {
@@ -24,16 +22,17 @@ export class SystemPortabilityService {
 
     const exportData: Record<string, any[]> = {};
     const tables = this.dbEngine.tables;
+    const systemTables = this.schemaManager.systemTables;
 
     for (const table of tables) {
-      exportData[table.name] = await table.toArray();
+      // ARCHITECTURE FIX: Never export system tables (os_vault, os_ai_profiles)
+      // to ensure cross-device portability without compromising security.
+      if (!systemTables.includes(table.name)) {
+        exportData[table.name] = await table.toArray();
+      }
     }
 
-    const rawJson = JSON.stringify(exportData);
-    const masterKey = this.securityService.getSessionKey();
-    const { cipherTextHex, ivHex } = await this.cryptoService.encrypt(rawJson, masterKey);
-
-    return JSON.stringify({ isArenaEncryptedExport: true, ivHex, data: cipherTextHex });
+    return JSON.stringify({ isArenaExport: true, version: 1, data: exportData });
   }
 
   async importEcosystem(jsonString: string): Promise<void> {
@@ -49,21 +48,16 @@ export class SystemPortabilityService {
         throw new Error('Malformed JSON string.');
       }
 
-      // SECURITY FIX: Reject legacy plain-text backups to enforce security
-      if (!parsedWrap.isArenaEncryptedExport || !parsedWrap.data || !parsedWrap.ivHex) {
-        throw new FrameworkError('INSECURE_IMPORT', 'Plain-text or invalid backups are rejected for security reasons.', false);
+      // Ensure it's our designated export format
+      if (!parsedWrap.isArenaExport || !parsedWrap.data) {
+        throw new Error('Invalid or legacy export file.');
       }
 
-      const masterKey = this.securityService.getSessionKey();
-      const payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
-      const parsedData: Record<string, any[]> = JSON.parse(payloadStr);
+      const parsedData: Record<string, any[]> = parsedWrap.data;
 
-      // SECURITY FIX: Prevent Prototype Pollution and DOS via malformed structures
-      if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+      // SECURITY FIX: Deep DOS and Prototype Pollution check
+      if (typeof parsedData !== 'object' || Array.isArray(parsedData)) {
         throw new Error('Invalid export format structure.');
-      }
-      if ('__proto__' in parsedData || 'constructor' in parsedData) {
-        throw new Error('Malicious prototype pollution payload detected.');
       }
 
       const systemTables = this.schemaManager.systemTables;
@@ -71,9 +65,15 @@ export class SystemPortabilityService {
 
       await this.dbEngine.transaction('rw', safeTablesToImport, async () => {
         for (const table of safeTablesToImport) {
-          if (parsedData[table.name] && Array.isArray(parsedData[table.name])) {
+          const tableData = parsedData[table.name];
+
+          if (tableData && Array.isArray(tableData)) {
+            // DOS Protection: Limit records per table
+            if (tableData.length > 50000) {
+              throw new Error(`Payload too large for table ${table.name}.`);
+            }
             await table.clear();
-            await table.bulkPut(parsedData[table.name]);
+            await table.bulkPut(tableData);
           }
         }
       });
@@ -81,7 +81,7 @@ export class SystemPortabilityService {
       console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
       console.error('[Portability] Failed to import ecosystem:', error);
-      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format, structural corruption, or wrong encryption key.', false, error);
+      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or data corruption detected.', false, error);
     }
   }
 

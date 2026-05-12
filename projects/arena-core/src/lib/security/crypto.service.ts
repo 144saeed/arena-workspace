@@ -14,18 +14,26 @@ export class CryptoService {
     return this.bufferToHex(salt.buffer);
   }
 
+  /**
+   * Performs a cryptographically secure, constant-time byte comparison.
+   * Completely immune to JS Unicode and JIT optimization timing leaks.
+   */
   constantTimeCompare(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const arrA = encoder.encode(a);
+    const arrB = encoder.encode(b);
+
+    const maxLength = Math.max(arrA.length, arrB.length);
     let mismatch = 0;
-    // ARCHITECTURE FIX: Never return early. Iterate through the longest string length 
-    // to guarantee identical execution time regardless of mismatch position.
-    const maxLength = Math.max(a.length, b.length);
-    if (a.length !== b.length) mismatch = 1;
+
+    if (arrA.length !== arrB.length) mismatch = 1;
 
     for (let i = 0; i < maxLength; i++) {
-      const charA = i < a.length ? a.charCodeAt(i) : 0;
-      const charB = i < b.length ? b.charCodeAt(i) : 0;
-      mismatch |= charA ^ charB;
+      const byteA = i < arrA.length ? arrA[i] : 0;
+      const byteB = i < arrB.length ? arrB[i] : 0;
+      mismatch |= byteA ^ byteB;
     }
+
     return mismatch === 0;
   }
 

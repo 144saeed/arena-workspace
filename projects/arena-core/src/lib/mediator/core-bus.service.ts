@@ -4,33 +4,20 @@ import { IMessageHandler } from '../contracts/interfaces/message-handler.interfa
 import { IMiddleware } from '../contracts/interfaces/middleware.interface';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
-/**
- * The Central Command/Query Bus of the OS.
- * Completely Type-Safe: Routes messages using their Class Constructor reference.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CoreBus {
 
-  // The registry mapping a Message Class to its Handler Class
   private readonly handlers = new Map<Type<IMessage>, Type<IMessageHandler<any, any>>>();
-
-  // The execution pipeline
   private readonly middlewares: IMiddleware[] = [];
 
   constructor(private readonly injector: Injector) { }
 
-  /**
-   * Registers a global middleware to intercept all bus traffic.
-   */
   useMiddleware(middleware: IMiddleware): void {
     this.middlewares.push(middleware);
   }
 
-  /**
-   * Binds a Message Class strictly to its Handler Class.
-   */
   registerHandler<TMessage extends IMessage, TResult>(
     messageType: Type<TMessage>,
     handlerType: Type<IMessageHandler<TMessage, TResult>>
@@ -41,11 +28,7 @@ export class CoreBus {
     this.handlers.set(messageType, handlerType);
   }
 
-  /**
-   * Dispatches the message through the middleware pipeline and ultimately to the handler.
-   */
   async dispatch<TResult>(message: IMessage): Promise<TResult> {
-    // Extract the exact Class reference of the incoming message instance
     const messageType = message.constructor as Type<IMessage>;
     const HandlerType = this.handlers.get(messageType);
 
@@ -53,21 +36,18 @@ export class CoreBus {
       throw new Error(`[Core Bus] Critical Error: No handler registered for message type '${messageType.name}'.`);
     }
 
-    // Lazy instantiation using Angular's DI container
     const handlerInstance = this.injector.get(HandlerType);
 
-    // Build and execute the chain dynamically
-    let index = 0;
-    const executePipeline = async (): Promise<TResult> => {
-      if (index < this.middlewares.length) {
-        const currentMiddleware = this.middlewares[index++];
-        return await currentMiddleware.handle(message, executePipeline);
+    // ARCHITECTURE FIX: Pass the index functionally to prevent shared-state mutations 
+    // across concurrent asynchronous middleware executions.
+    const executePipeline = async (idx: number): Promise<TResult> => {
+      if (idx < this.middlewares.length) {
+        const currentMiddleware = this.middlewares[idx];
+        return await currentMiddleware.handle(message, () => executePipeline(idx + 1));
       }
-
-      // Pipeline exhausted, execute the actual business logic
       return await handlerInstance.handle(message);
     };
 
-    return await executePipeline();
+    return await executePipeline(0);
   }
 }
