@@ -3,11 +3,8 @@ import { CoreDatabaseService } from '../database/core-database.service';
 import { SecurityService } from '../security/security.service';
 import { SchemaManagerService } from '../database/schema-manager.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
+import { CryptoService } from '../security/crypto.service';
 
-/**
- * Manages the import, export, and destruction of the entire OS ecosystem.
- * Enables local-first portability ensuring the user owns their data.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -16,7 +13,8 @@ export class SystemPortabilityService {
   constructor(
     private readonly dbEngine: CoreDatabaseService,
     private readonly securityService: SecurityService,
-    private readonly schemaManager: SchemaManagerService
+    private readonly schemaManager: SchemaManagerService,
+    private readonly cryptoService: CryptoService
   ) { }
 
   async exportEcosystem(): Promise<string> {
@@ -31,8 +29,12 @@ export class SystemPortabilityService {
       exportData[table.name] = await table.toArray();
     }
 
-    console.log(`[Portability] Successfully exported ${tables.length} tables.`);
-    return JSON.stringify(exportData);
+    // SECURITY FIX: Encrypt the entire export payload to protect sensitive user data
+    const rawJson = JSON.stringify(exportData);
+    const masterKey = this.securityService.getSessionKey();
+    const { cipherTextHex, ivHex } = await this.cryptoService.encrypt(rawJson, masterKey);
+
+    return JSON.stringify({ isArenaEncryptedExport: true, ivHex, data: cipherTextHex });
   }
 
   async importEcosystem(jsonString: string): Promise<void> {
@@ -41,26 +43,38 @@ export class SystemPortabilityService {
     }
 
     try {
-      const parsedData: Record<string, any[]> = JSON.parse(jsonString);
+      const parsedWrap = JSON.parse(jsonString);
+      let payloadStr = jsonString;
 
-      // SECURITY FIX: Filter out strictly protected OS tables so a malicious 
-      // backup file cannot overwrite the Master Vault or AI Profiles.
+      // Handle Decryption if format is the new secure encrypted export
+      if (parsedWrap.isArenaEncryptedExport) {
+        const masterKey = this.securityService.getSessionKey();
+        payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
+      }
+
+      const parsedData: Record<string, any[]> = JSON.parse(payloadStr);
+
+      // SECURITY FIX: Prevent malformed payload crashes
+      if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+        throw new Error('Invalid export format structure.');
+      }
+
       const systemTables = this.schemaManager.systemTables;
       const safeTablesToImport = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
 
       await this.dbEngine.transaction('rw', safeTablesToImport, async () => {
         for (const table of safeTablesToImport) {
-          if (parsedData[table.name]) {
+          if (parsedData[table.name] && Array.isArray(parsedData[table.name])) {
             await table.clear();
             await table.bulkPut(parsedData[table.name]);
           }
         }
       });
 
-      console.log('[Portability] Ecosystem imported and restored successfully (System tables were protected).');
+      console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
-      console.error('[Portability] Failed to import ecosystem. Data might be corrupted.', error);
-      throw new FrameworkError('IMPORT_FAILED', '[Portability] Import failed. Invalid file format or database error.', false, error);
+      console.error('[Portability] Failed to import ecosystem:', error);
+      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or wrong encryption key.', false, error);
     }
   }
 
@@ -68,7 +82,6 @@ export class SystemPortabilityService {
     if (!this.securityService.isVaultUnlocked()) {
       throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot perform a soft reset while the vault is locked.', false);
     }
-
     const systemTables = this.schemaManager.systemTables;
     const tablesToClear = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
 
@@ -77,12 +90,12 @@ export class SystemPortabilityService {
         await table.clear();
       }
     });
-
-    console.log('[Portability] Soft reset complete. Plugin data wiped. OS state retained.');
   }
 
   async factoryReset(): Promise<void> {
     console.warn('[Portability] INITIATING FACTORY RESET...');
+    // ARCHITECTURE NOTE: We explicitly DO NOT require vault authentication here.
+    // This is the emergency escape hatch for users who lost their master password.
     this.securityService.lockVault();
 
     try {
@@ -100,11 +113,8 @@ export class SystemPortabilityService {
 
       localStorage.clear();
       sessionStorage.clear();
-
-      console.log('[Portability] Factory reset complete. Reloading environment...');
       window.location.reload();
     } catch (error) {
-      console.error('[Portability] Critical error during factory reset:', error);
       throw new FrameworkError('FACTORY_RESET_FAILED', 'Critical error during factory reset', false, error);
     }
   }

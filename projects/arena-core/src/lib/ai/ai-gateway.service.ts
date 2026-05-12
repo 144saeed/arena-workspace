@@ -33,8 +33,7 @@ export class AiGatewayService {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
         return adapter.generateResponse(finalRequest, decryptedKey, abortSignal).pipe(
           tap(() => this.connectionMonitor.updateState(profileId, 'Connected')),
-          catchError((error) => this.handleConnectionError(error, profileId)),
-          finalize(() => { decryptedKey = ''; })
+          catchError((error) => this.handleConnectionError(error, profileId))
         );
       })
     );
@@ -53,8 +52,7 @@ export class AiGatewayService {
               }
             },
             error: (error) => this.handleConnectionError(error, profileId)
-          }),
-          finalize(() => { decryptedKey = ''; })
+          })
         );
       })
     );
@@ -65,8 +63,7 @@ export class AiGatewayService {
       switchMap(({ adapter, decryptedKey, profileId }) => {
         return adapter.validateKey(decryptedKey).pipe(
           tap((isValid) => this.connectionMonitor.updateState(profileId, isValid ? 'Connected' : 'InvalidKey')),
-          catchError((error) => this.handleConnectionError(error, profileId)),
-          finalize(() => { decryptedKey = ''; })
+          catchError((error) => this.handleConnectionError(error, profileId))
         );
       })
     );

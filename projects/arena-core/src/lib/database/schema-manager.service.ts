@@ -33,7 +33,7 @@ export class SchemaManagerService {
   private _systemTables: string[] = [];
 
   public get systemTables(): string[] {
-    return this._systemTables;
+    return [...this._systemTables];
   }
 
   async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {

@@ -2,6 +2,7 @@ import { Injectable, Injector, Type } from '@angular/core';
 import { IMessage } from '../contracts/interfaces/message.interface';
 import { IMessageHandler } from '../contracts/interfaces/message-handler.interface';
 import { IMiddleware } from '../contracts/interfaces/middleware.interface';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 /**
  * The Central Command/Query Bus of the OS.
@@ -35,7 +36,7 @@ export class CoreBus {
     handlerType: Type<IMessageHandler<TMessage, TResult>>
   ): void {
     if (this.handlers.has(messageType)) {
-      console.warn(`[Core Bus] Overwriting existing handler for message: ${messageType.name}`);
+      throw new FrameworkError('REGISTRY_COLLISION', `Critical Error: Collision detected for ${messageType.name}`, false);
     }
     this.handlers.set(messageType, handlerType);
   }

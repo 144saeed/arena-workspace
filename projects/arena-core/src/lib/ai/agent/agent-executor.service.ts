@@ -8,17 +8,13 @@ import { AiMessageDto } from '../../contracts/dtos/ai-message.dto';
 import { AiMessagePartDto } from '../../contracts/dtos/ai-message-part.dto';
 import { FrameworkError } from '../../exceptions/framework-error.exception';
 
-/**
- * The Orchestrator Engine for Autonomous AI Agents.
- * Now fully supports multimodal parts, structured tool results, semantic error halting,
- * parallel tool execution, and secure task cancellation via AbortSignal.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class AgentExecutorService {
 
-  private readonly DEFAULT_MAX_ITERATIONS = 3;
+  // ARCHITECTURE FIX: Increased default iterations to support complex reasoning chains
+  private readonly DEFAULT_MAX_ITERATIONS = 5;
 
   constructor(
     private readonly gateway: AiGatewayService,
@@ -26,108 +22,82 @@ export class AgentExecutorService {
   ) { }
 
   async executeTask(
-    request: AiRequestDto,
-    targetProfileId?: string,
-    maxIterations: number = this.DEFAULT_MAX_ITERATIONS,
-    abortSignal?: AbortSignal
+    request: AiRequestDto, targetProfileId?: string, maxIterations: number = this.DEFAULT_MAX_ITERATIONS, abortSignal?: AbortSignal
   ): Promise<AiResponseDto> {
 
-    // ARCHITECTURE FIX: Use strict functional spreading to preserve DTO readonly constraints.
-    // Never mutate currentRequest.tools directly.
     let currentRequest: AiRequestDto = {
       ...request,
-      tools: (request.tools && request.tools.length > 0)
-        ? request.tools
-        : this.toolRegistry.getRegisteredTools()
+      tools: (request.tools && request.tools.length > 0) ? request.tools : this.toolRegistry.getRegisteredTools()
     };
 
     let iterationCount = 0;
 
     while (iterationCount < maxIterations) {
-      if (abortSignal?.aborted) {
-        throw new FrameworkError('AGENT_ABORTED', 'Agent execution was cancelled.', false);
-      }
+      if (abortSignal?.aborted) throw new FrameworkError('AGENT_ABORTED', 'Agent execution was cancelled.', false);
 
       iterationCount++;
-
       const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId, abortSignal));
 
-      if (!response) {
-        throw new FrameworkError('AGENT_EMPTY_RESPONSE', 'Execution failed: AI returned an empty response.', true);
-      }
+      if (!response) throw new FrameworkError('AGENT_EMPTY_RESPONSE', 'Execution failed: AI returned an empty response.', true);
 
       if (response.toolCalls && response.toolCalls.length > 0) {
 
         const assistantParts: AiMessagePartDto[] = [];
-        if (response.content) {
-          assistantParts.push({ type: 'text', text: response.content });
-        }
-        response.toolCalls.forEach(call => {
-          assistantParts.push({ type: 'tool-call', toolCall: call });
-        });
+        if (response.content) assistantParts.push({ type: 'text', text: response.content });
+        response.toolCalls.forEach(call => assistantParts.push({ type: 'tool-call', toolCall: call }));
 
-        const aiMessage: AiMessageDto = {
-          role: 'assistant',
-          parts: assistantParts
-        };
-
-        // Re-assigning a completely new object to respect the 'readonly' array contract
         currentRequest = {
           ...currentRequest,
-          messages: [...currentRequest.messages, aiMessage]
+          messages: [...currentRequest.messages, { role: 'assistant', parts: assistantParts }]
         };
 
         const toolResultsParts: AiMessagePartDto[] = [];
         let hasFatalError = false;
         let fatalErrorMessage = '';
 
+        // ARCHITECTURE FIX: Local AbortController to cancel sibling tool executions if one fails fatally
+        const batchAbortController = new AbortController();
+        const mainAbortListener = () => batchAbortController.abort();
+        if (abortSignal) abortSignal.addEventListener('abort', mainAbortListener);
+
         const executionPromises = response.toolCalls.map(async (toolCall) => {
           console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
-          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, abortSignal);
+          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
+
+          if (result.status === 'fatal_error') {
+            batchAbortController.abort(); // Cancel parallel tools
+          }
           return { toolCall, result };
         });
 
         const executionResults = await Promise.all(executionPromises);
+        if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
 
         for (const { toolCall, result } of executionResults) {
-          const resultPayload = result.status === 'success'
-            ? result.data
-            : { error: result.errorMessage, suggestion: 'Please fix the parameters or try a different approach.' };
-
+          const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
           toolResultsParts.push({
             type: 'tool-result',
             toolCallId: toolCall.id,
             toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
           });
-
           if (result.status === 'fatal_error') {
             hasFatalError = true;
             fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
           }
         }
 
-        const toolMessage: AiMessageDto = {
-          role: 'tool',
-          parts: toolResultsParts
-        };
-
-        // Re-assigning again to respect readonly constraint
         currentRequest = {
           ...currentRequest,
-          messages: [...currentRequest.messages, toolMessage]
+          messages: [...currentRequest.messages, { role: 'tool', parts: toolResultsParts }]
         };
 
         if (hasFatalError) {
           throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
         }
-
         continue;
       }
-
-      console.log(`[Agent Executor] Task completed successfully in ${iterationCount} iterations.`);
       return response;
     }
-
     throw new FrameworkError('AGENT_MAX_ITERATIONS', `Task halted: Maximum agent iterations (${maxIterations}) exceeded.`, false);
   }
 }

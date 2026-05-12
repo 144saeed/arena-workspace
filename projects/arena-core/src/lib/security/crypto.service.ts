@@ -1,16 +1,10 @@
 import { Injectable } from '@angular/core';
 
-/**
- * The Cryptographic Engine of the OS.
- * Implements AES-256-GCM for encryption and PBKDF2 for key derivation AND hashing.
- * Operates purely on the browser's native Web Crypto API.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CryptoService {
 
-  // SECURITY FIX: Upgraded to OWASP 2024 recommendations
   private readonly ITERATIONS = 600000;
   private readonly SALT_SIZE_BYTES = 32;
   private readonly ENCRYPTION_ALGO = 'AES-GCM';
@@ -20,62 +14,43 @@ export class CryptoService {
     return this.bufferToHex(salt.buffer);
   }
 
-  /**
-   * Performs a constant-time string comparison to prevent cryptographic timing attacks.
-   */
   constantTimeCompare(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    let result = 0;
-    for (let i = 0; i < a.length; i++) {
-      result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    let mismatch = 0;
+    // ARCHITECTURE FIX: Never return early. Iterate through the longest string length 
+    // to guarantee identical execution time regardless of mismatch position.
+    const maxLength = Math.max(a.length, b.length);
+    if (a.length !== b.length) mismatch = 1;
+
+    for (let i = 0; i < maxLength; i++) {
+      const charA = i < a.length ? a.charCodeAt(i) : 0;
+      const charB = i < b.length ? b.charCodeAt(i) : 0;
+      mismatch |= charA ^ charB;
     }
-    return result === 0;
+    return mismatch === 0;
   }
 
   async hashPassword(password: string, saltHex: string): Promise<string> {
     const encoder = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(password),
-      { name: 'PBKDF2' },
-      false,
-      ['deriveBits']
+      'raw', encoder.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
     );
-
     const saltBuffer = this.hexToBuffer(saltHex);
-
     const hashBuffer = await crypto.subtle.deriveBits(
-      {
-        name: 'PBKDF2',
-        salt: saltBuffer,
-        iterations: this.ITERATIONS,
-        hash: 'SHA-256'
-      },
-      keyMaterial,
-      256
+      { name: 'PBKDF2', salt: saltBuffer, iterations: this.ITERATIONS, hash: 'SHA-256' },
+      keyMaterial, 256
     );
-
     return this.bufferToHex(hashBuffer);
   }
 
   async deriveMasterKey(password: string, saltHex: string): Promise<CryptoKey> {
     const encoder = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(password),
-      { name: 'PBKDF2' },
-      false,
-      ['deriveBits', 'deriveKey']
+      'raw', encoder.encode(password), { name: 'PBKDF2' }, false, ['deriveBits', 'deriveKey']
     );
-
     const saltBuffer = this.hexToBuffer(saltHex);
-
     return await crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt: saltBuffer, iterations: this.ITERATIONS, hash: 'SHA-256' },
-      keyMaterial,
-      { name: this.ENCRYPTION_ALGO, length: 256 },
-      false,
-      ['encrypt', 'decrypt']
+      keyMaterial, { name: this.ENCRYPTION_ALGO, length: 256 }, false, ['encrypt', 'decrypt']
     );
   }
 
@@ -83,29 +58,14 @@ export class CryptoService {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const encoder = new TextEncoder();
     const encodedText = encoder.encode(plaintext);
-
-    const cipherBuffer = await crypto.subtle.encrypt(
-      { name: this.ENCRYPTION_ALGO, iv: iv },
-      key,
-      encodedText
-    );
-
-    return {
-      cipherTextHex: this.bufferToHex(cipherBuffer),
-      ivHex: this.bufferToHex(iv.buffer)
-    };
+    const cipherBuffer = await crypto.subtle.encrypt({ name: this.ENCRYPTION_ALGO, iv: iv }, key, encodedText);
+    return { cipherTextHex: this.bufferToHex(cipherBuffer), ivHex: this.bufferToHex(iv.buffer) };
   }
 
   async decrypt(cipherTextHex: string, ivHex: string, key: CryptoKey): Promise<string> {
     const cipherBuffer = this.hexToBuffer(cipherTextHex);
     const ivBuffer = this.hexToBuffer(ivHex);
-
-    const decryptedBuffer = await crypto.subtle.decrypt(
-      { name: this.ENCRYPTION_ALGO, iv: ivBuffer },
-      key,
-      cipherBuffer
-    );
-
+    const decryptedBuffer = await crypto.subtle.decrypt({ name: this.ENCRYPTION_ALGO, iv: ivBuffer }, key, cipherBuffer);
     const decoder = new TextDecoder();
     return decoder.decode(decryptedBuffer);
   }
