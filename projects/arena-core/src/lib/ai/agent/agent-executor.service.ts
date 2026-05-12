@@ -49,7 +49,8 @@ export class AgentExecutorService {
 
       iterationCount++;
 
-      const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId));
+      // SECURITY/PERF FIX: Pass abortSignal down to the gateway to halt native fetch requests
+      const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId, abortSignal));
 
       if (!response) {
         throw new FrameworkError('AGENT_EMPTY_RESPONSE', 'Execution failed: AI returned an empty response.', true);

@@ -29,12 +29,13 @@ export class AiGatewayService {
 
   /**
    * Dispatches a request for a complete, single-turn response.
+   * Passes the AbortSignal down to the adapter layer for native network cancellation.
    */
-  dispatch(request: AiRequestDto, targetProfileId?: string): Observable<AiResponseDto> {
+  dispatch(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        return adapter.generateResponse(finalRequest, decryptedKey).pipe(
+        return adapter.generateResponse(finalRequest, decryptedKey, abortSignal).pipe(
           tap(() => this.connectionMonitor.updateState(profileId, 'Connected')),
           catchError((error) => this.handleConnectionError(error, profileId)),
           finalize(() => { decryptedKey = ''; })
@@ -45,7 +46,6 @@ export class AiGatewayService {
 
   /**
    * Dispatches a request and returns a continuous stream of AI events (SSE).
-   * Excellent for real-time chat UX and interruptible operations.
    */
   dispatchStream(request: AiRequestDto, targetProfileId?: string): Observable<AiEventDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
@@ -54,7 +54,6 @@ export class AiGatewayService {
         return adapter.generateStream(finalRequest, decryptedKey).pipe(
           tap({
             next: (event) => {
-              // Only update on meaningful chunks to avoid rapid signal firing
               if (event.type === 'chunk' || event.type === 'complete') {
                 this.connectionMonitor.updateState(profileId, 'Connected');
               }
@@ -85,7 +84,7 @@ export class AiGatewayService {
       : await this.profileRepo.getActiveProfile();
 
     if (!profile) {
-      throw new Error(`[AI Gateway] Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`);
+      throw new FrameworkError('AI_PROFILE_NOT_FOUND', `Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`, false);
     }
 
     const masterKey = this.securityService.getSessionKey();
@@ -95,22 +94,18 @@ export class AiGatewayService {
     return { adapter, decryptedKey, model: profile.selectedModel, profileId: profile.profileId };
   }
 
-  // اضافه کردن این ایمپورت به بالای فایل
-  // import { FrameworkError } from '../../exceptions/framework-error.exception';
-
   private handleConnectionError(error: any, profileId: string): Observable<never> {
     const errorMsg = String(error).toLowerCase();
     const isAuthError = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401');
     const state = isAuthError ? 'InvalidKey' : 'Disconnected';
-    
+
     this.connectionMonitor.updateState(profileId, state);
-    
-    // Wrap native errors in the standardized FrameworkError
+
     const frameworkError = new FrameworkError(
-        isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
-        error.message || 'AI Connection failed',
-        !isAuthError, // Network errors are potentially retryable, Auth errors are not
-        error
+      isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
+      error.message || 'AI Connection failed',
+      !isAuthError,
+      error
     );
 
     return throwError(() => frameworkError);

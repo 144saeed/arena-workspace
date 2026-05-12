@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 interface DbMetaRecord {
   id: number;
@@ -31,9 +32,6 @@ export class SchemaManagerService {
   private readonly metaDb = new MetaDatabase();
   private _systemTables: string[] = [];
 
-  /**
-   * Returns a list of strictly protected OS tables.
-   */
   public get systemTables(): string[] {
     return this._systemTables;
   }
@@ -42,17 +40,20 @@ export class SchemaManagerService {
     const combinedSchema: Record<string, string> = {};
     const allSchemas = [...coreSchemas, ...pluginSchemas];
 
-    // Identify and cache system tables
     this._systemTables = allSchemas.filter(s => s.isSystem).map(s => s.tableName);
 
     allSchemas.forEach(schema => {
       if (combinedSchema[schema.tableName]) {
-        console.warn(`[Schema Manager] Warning: Overwriting existing table schema for: ${schema.tableName}`);
+        // SECURITY/DATA-INTEGRITY FIX: Throw hard error on table name collisions
+        throw new FrameworkError(
+          'DB_SCHEMA_COLLISION',
+          `Critical Error: Multiple plugins attempted to register the same table name '${schema.tableName}'. This will cause data corruption.`,
+          false
+        );
       }
       combinedSchema[schema.tableName] = schema.schemaDefinition;
     });
 
-    // Sort keys alphabetically to guarantee deterministic JSON.stringify output
     const sortedKeys = Object.keys(combinedSchema).sort();
     const sortedSchema: Record<string, string> = {};
     sortedKeys.forEach(key => {
