@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { CoreDatabaseService } from '../database/core-database.service';
 import { SecurityService } from '../security/security.service';
+import { SchemaManagerService } from '../database/schema-manager.service';
 
 /**
  * Manages the import, export, and destruction of the entire OS ecosystem.
@@ -13,7 +14,8 @@ export class SystemPortabilityService {
 
   constructor(
     private readonly dbEngine: CoreDatabaseService,
-    private readonly securityService: SecurityService
+    private readonly securityService: SecurityService,
+    private readonly schemaManager: SchemaManagerService
   ) { }
 
   /**
@@ -75,8 +77,9 @@ export class SystemPortabilityService {
       throw new Error('[Portability] Cannot perform a soft reset while the vault is locked.');
     }
 
-    // Filter out OS mandatory tables to strictly wipe plugin data only
-    const tablesToClear = this.dbEngine.tables.filter(t => !t.name.startsWith('os_'));
+    // Retrieve strictly protected tables directly from the Schema Manager
+    const systemTables = this.schemaManager.systemTables;
+    const tablesToClear = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
 
     await this.dbEngine.transaction('rw', tablesToClear, async () => {
       for (const table of tablesToClear) {

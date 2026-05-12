@@ -29,10 +29,21 @@ class MetaDatabase extends Dexie {
 export class SchemaManagerService {
 
   private readonly metaDb = new MetaDatabase();
+  private _systemTables: string[] = [];
+
+  /**
+   * Returns a list of strictly protected OS tables.
+   */
+  public get systemTables(): string[] {
+    return this._systemTables;
+  }
 
   async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {
     const combinedSchema: Record<string, string> = {};
     const allSchemas = [...coreSchemas, ...pluginSchemas];
+
+    // Identify and cache system tables
+    this._systemTables = allSchemas.filter(s => s.isSystem).map(s => s.tableName);
 
     allSchemas.forEach(schema => {
       if (combinedSchema[schema.tableName]) {

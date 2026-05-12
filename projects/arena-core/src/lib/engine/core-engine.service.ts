@@ -7,6 +7,7 @@ import { SecurityService } from '../security/security.service';
 import { ProcessMonitorMiddleware } from '../monitor/middlewares/process-monitor.middleware';
 import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.middleware';
 import { AiRegistryService } from '../ai/ai-registry.service';
+import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
 
 /**
  * The Main Kernel of the Framework.
@@ -45,8 +46,9 @@ export class CoreEngineService {
 
       // PHASE 1: Database Initialization
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
-      await this.databaseEngine.initializeDatabase(pluginSchemas, []);
-      console.log('[Core Engine] Phase 1: Database initialized.');
+      // Injecting OS schemas dynamically prevents Ghost Tables
+      await this.databaseEngine.initializeDatabase(pluginSchemas, OS_MANDATORY_SCHEMAS);
+      console.log('[Core Engine] Phase 1: Database initialized with core and plugin schemas.');
 
       // PHASE 2: AI Adapter Registration (BYOA - Bring Your Own Adapter)
       aiAdapters.forEach(adapterClass => {

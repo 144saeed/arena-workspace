@@ -4,7 +4,7 @@ import { CoreDatabaseService } from './core-database.service';
 /**
  * Abstract base class providing standard CRUD operations.
  * Applications extend this class to easily interact with their specific tables.
- * * @template T Entity interface
+ * @template T Entity interface
  * @template TKey Primary Key type (usually string or number)
  */
 export abstract class BaseRepository<T, TKey> {
@@ -26,8 +26,8 @@ export abstract class BaseRepository<T, TKey> {
         return await this.table.get(id);
     }
 
-    async create(item: Omit<T, 'id'> | T): Promise<TKey> {
-        return await this.table.add(item as T);
+    async create(item: T): Promise<TKey> {
+        return await this.table.add(item);
     }
 
     async update(id: TKey, changes: Partial<T>): Promise<number> {
