@@ -158,6 +158,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
   // --- Internal Data Mapping Utilities ---
 
+  // --- Internal Data Mapping Utilities ---
+
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
       contents: request.messages.map(msg => {
@@ -167,17 +169,24 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
         const parts: any[] = [];
 
-        if (msg.role === 'tool' && msg.toolCallId) {
-          parts.push({
-            functionResponse: { name: msg.toolCallId, response: { result: msg.content } }
-          });
-        } else if (msg.toolCalls && msg.toolCalls.length > 0) {
-          msg.toolCalls.forEach(call => {
-            parts.push({ functionCall: { name: call.name, args: call.arguments } });
-          });
-        } else {
-          parts.push({ text: msg.content });
-        }
+        // Advanced Multimodal Mapping
+        msg.parts.forEach(p => {
+          if (p.type === 'text' && p.text) {
+            parts.push({ text: p.text });
+          } else if (p.type === 'tool-call' && p.toolCall) {
+            parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
+          } else if (p.type === 'tool-result' && p.toolCallId) {
+            parts.push({ functionResponse: { name: p.toolCallId, response: { result: p.toolResult } } });
+          } else if (p.type === 'image' && p.imageUrl) {
+            // Safely parse standard Data URIs (data:image/png;base64,iVBORw...)
+            const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+            if (match) {
+              parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+            } else {
+              console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
+            }
+          }
+        });
 
         return { role, parts };
       }),
@@ -236,18 +245,18 @@ import { AiToolRegistryService } from './ai-tool-registry.service';
 import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
 import { AiMessageDto } from '../../contracts/dtos/ai-message.dto';
+import { AiMessagePartDto } from '../../contracts/dtos/ai-message-part.dto';
+import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 /**
  * The Orchestrator Engine for Autonomous AI Agents.
- * Manages the "Think -> Act -> Observe -> Think" loop, executing local tools 
- * automatically and feeding the results back to the AI model.
+ * Now fully supports multimodal parts, structured tool results, and semantic error halting.
  */
 @Injectable({
   providedIn: 'root'
 })
 export class AgentExecutorService {
 
-  // Default hardcoded limit to prevent infinite loops and protect user tokens
   private readonly DEFAULT_MAX_ITERATIONS = 3;
 
   constructor(
@@ -255,23 +264,14 @@ export class AgentExecutorService {
     private readonly toolRegistry: AiToolRegistryService
   ) { }
 
-  /**
-   * Executes an autonomous agent loop to fulfill a complex user request.
-   * @param request The initial request payload.
-   * @param targetProfileId Optional target AI profile.
-   * @param maxIterations Allows the developer to safely override the loop limit per task.
-   */
   async executeTask(
     request: AiRequestDto,
     targetProfileId?: string,
     maxIterations: number = this.DEFAULT_MAX_ITERATIONS
   ): Promise<AiResponseDto> {
 
-    // Create an isolated copy of the request to track conversational state dynamically.
-    // We use 'let' and object spreading to respect the 'readonly' constraints of the DTO.
     let currentRequest: AiRequestDto = {
       ...request,
-      // Auto-inject all registered local tools if the developer didn't manually specify them
       tools: (request.tools && request.tools.length > 0)
         ? request.tools
         : this.toolRegistry.getRegisteredTools()
@@ -282,78 +282,99 @@ export class AgentExecutorService {
     while (iterationCount < maxIterations) {
       iterationCount++;
 
-      // 1. Dispatch the current state to the AI Gateway
-      // Using firstValueFrom to gracefully bridge RxJS streams into our async/await loop
       const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId));
 
       if (!response) {
-        throw new Error('[Agent Executor] Execution failed: AI returned an empty response.');
+        throw new FrameworkError('AGENT_EMPTY_RESPONSE', 'Execution failed: AI returned an empty response.', true);
       }
 
-      // 2. Observe: Did the AI decide to call tools?
       if (response.toolCalls && response.toolCalls.length > 0) {
 
-        // Step A: Append the AI's tool request to the conversational history
+        // Convert the assistant's string/tool responses into proper multimodal parts
+        const assistantParts: AiMessagePartDto[] = [];
+        if (response.content) {
+          assistantParts.push({ type: 'text', text: response.content });
+        }
+        response.toolCalls.forEach(call => {
+          assistantParts.push({ type: 'tool-call', toolCall: call });
+        });
+
         const aiMessage: AiMessageDto = {
           role: 'assistant',
-          content: response.content || '',
-          toolCalls: response.toolCalls
+          parts: assistantParts
         };
 
-        // Re-assign creating a new object to respect readonly 'messages' array
         currentRequest = {
           ...currentRequest,
           messages: [...currentRequest.messages, aiMessage]
         };
 
-        // Step B: Act by executing the tools locally
-        const toolResultsMessages: AiMessageDto[] = [];
+        const toolResultsParts: AiMessagePartDto[] = [];
+        let hasFatalError = false;
+        let fatalErrorMessage = '';
 
+        // Execute tools and evaluate their semantic structured status
         for (const toolCall of response.toolCalls) {
-          console.log(`[Agent Executor] Iteration ${iterationCount}: AI is executing tool '${toolCall.name}'...`);
+          console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
 
-          const resultString = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments);
+          const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments);
 
-          toolResultsMessages.push({
-            role: 'tool',
-            content: resultString,
-            toolCallId: toolCall.name // Maps exactly to Gemini adapter tracking
+          // Map structured result back to string for the AI's understanding
+          const resultPayload = result.status === 'success'
+            ? result.data
+            : { error: result.errorMessage, suggestion: 'Please fix the parameters or try a different approach.' };
+
+          toolResultsParts.push({
+            type: 'tool-result',
+            toolCallId: toolCall.name,
+            toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
           });
+
+          if (result.status === 'fatal_error') {
+            hasFatalError = true;
+            fatalErrorMessage = result.errorMessage || 'Unknown fatal tool error';
+            break; // Halt parallel tool execution in this batch
+          }
         }
 
-        // Step C: Feed the local results back to the AI and restart the loop
+        const toolMessage: AiMessageDto = {
+          role: 'tool',
+          parts: toolResultsParts
+        };
+
         currentRequest = {
           ...currentRequest,
-          messages: [...currentRequest.messages, ...toolResultsMessages]
+          messages: [...currentRequest.messages, toolMessage]
         };
+
+        // Semantic Halt: Break the infinite loop if the tool critically failed
+        if (hasFatalError) {
+          throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
+        }
 
         continue;
       }
 
-      // 3. Goal Reached: No tool calls requested, the AI has provided the final answer.
       console.log(`[Agent Executor] Task completed successfully in ${iterationCount} iterations.`);
       return response;
     }
 
-    // Safety Net Triggered
-    console.warn(`[Agent Executor] Critical Warning: Max iterations (${maxIterations}) reached. Halting execution to protect tokens.`);
-    throw new Error('[Agent Executor] Task halted: Maximum agent iterations exceeded without reaching a final answer.');
+    throw new FrameworkError('AGENT_MAX_ITERATIONS', `Task halted: Maximum agent iterations (${maxIterations}) exceeded.`, false);
   }
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\ai\agent\ai-tool-registry.service.ts
-import { Injectable } from '@angular/core';
+import { Injectable, Injector } from '@angular/core';
 import { AiToolDto } from '../../contracts/dtos/ai-tool.dto';
+import { StructuredToolResultDto } from '../../contracts/dtos/structured-tool-result.dto';
+import { IToolExecutionContext } from '../../contracts/interfaces/tool-execution-context.interface';
 
-/**
- * Defines the execution signature for any local tool (function).
- */
-export type ToolHandler = (args: Record<string, any>) => Promise<any>;
+export type ToolHandler = (args: Record<string, any>, context: IToolExecutionContext) => Promise<StructuredToolResultDto>;
 
 /**
  * The Central Registry for App-Specific AI Tools.
- * Applications register their callable functions here, allowing the Agent Executor 
- * to securely invoke local business logic based on AI decisions.
+ * Now injects execution contexts into handlers to prevent JavaScript 'this' binding 
+ * traps and provides native Angular DI capabilities to local tools.
  */
 @Injectable({
   providedIn: 'root'
@@ -362,11 +383,8 @@ export class AiToolRegistryService {
 
   private readonly tools = new Map<string, { definition: AiToolDto, handler: ToolHandler }>();
 
-  /**
-   * Registers a new tool that the AI can call.
-   * @param definition The strict JSON Schema definition of the tool.
-   * @param handler The local TypeScript function to execute when the AI calls this tool.
-   */
+  constructor(private readonly injector: Injector) { }
+
   registerTool(definition: AiToolDto, handler: ToolHandler): void {
     if (this.tools.has(definition.name)) {
       console.warn(`[Tool Registry] Overwriting existing tool registration for: ${definition.name}`);
@@ -375,29 +393,31 @@ export class AiToolRegistryService {
     console.log(`[Tool Registry] Tool registered successfully: ${definition.name}`);
   }
 
-  /**
-   * Retrieves all registered tool definitions to inject into an AI request.
-   */
   getRegisteredTools(): AiToolDto[] {
     return Array.from(this.tools.values()).map(t => t.definition);
   }
 
-  /**
-   * Securely executes a registered tool and safely formats the result as a string.
-   */
-  async executeTool(name: string, args: Record<string, any>): Promise<string> {
+  async executeTool(name: string, args: Record<string, any>, abortSignal?: AbortSignal): Promise<StructuredToolResultDto> {
     const tool = this.tools.get(name);
     if (!tool) {
-      throw new Error(`[Tool Registry] Critical Error: Tool '${name}' is not registered.`);
+      return {
+        status: 'fatal_error',
+        errorMessage: `[Tool Registry] Critical Error: Tool '${name}' is not registered.`
+      };
     }
 
     try {
-      const result = await tool.handler(args);
-      // AI adapters strictly require string responses for tool results
-      return typeof result === 'string' ? result : JSON.stringify(result);
+      const context: IToolExecutionContext = {
+        injector: this.injector,
+        abortSignal
+      };
+      return await tool.handler(args, context);
     } catch (error) {
-      console.error(`[Tool Registry] Tool '${name}' threw an error during execution:`, error);
-      return JSON.stringify({ error: String(error) });
+      console.error(`[Tool Registry] Tool '${name}' threw an unhandled exception:`, error);
+      return {
+        status: 'fatal_error',
+        errorMessage: String(error)
+      };
     }
   }
 }
@@ -413,6 +433,7 @@ import { SecurityService } from '../security/security.service';
 import { AiProfileRepository } from '../database/repositories/ai-profile-repository.repository';
 import { CryptoService } from '../security/crypto.service';
 import { AiConnectionMonitorService } from '../monitor/ai-connection-monitor.service';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 /**
  * The Central Communication Hub for all AI operations.
@@ -499,13 +520,25 @@ export class AiGatewayService {
     return { adapter, decryptedKey, model: profile.selectedModel, profileId: profile.profileId };
   }
 
+  // اضافه کردن این ایمپورت به بالای فایل
+  // import { FrameworkError } from '../../exceptions/framework-error.exception';
+
   private handleConnectionError(error: any, profileId: string): Observable<never> {
     const errorMsg = String(error).toLowerCase();
-    const state = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401')
-      ? 'InvalidKey'
-      : 'Disconnected';
+    const isAuthError = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401');
+    const state = isAuthError ? 'InvalidKey' : 'Disconnected';
+    
     this.connectionMonitor.updateState(profileId, state);
-    return throwError(() => error);
+    
+    // Wrap native errors in the standardized FrameworkError
+    const frameworkError = new FrameworkError(
+        isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
+        error.message || 'AI Connection failed',
+        !isAuthError, // Network errors are potentially retryable, Auth errors are not
+        error
+    );
+
+    return throwError(() => frameworkError);
   }
 }
 ------------------------------
@@ -596,24 +629,49 @@ export interface AiEventDto {
     readonly tokensUsed?: number;
 }
 ------------------------------
-Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-message.dto.ts
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-message-part.dto.ts
 import { AiToolCallDto } from './ai-tool-call.dto';
 
+export type AiMessagePartType = 'text' | 'image' | 'tool-call' | 'tool-result';
+
 /**
- * Standardized message format for AI interactions, completely supporting Agent workflows.
+ * Represents a single multimodal fragment of an AI message.
+ * Completely future-proofs the architecture against new media types (e.g., audio, video).
+ */
+export interface AiMessagePartDto {
+    readonly type: AiMessagePartType;
+
+    /** * Present if type is 'text' */
+    readonly text?: string;
+
+    /** * Present if type is 'image'. Expected as a Base64 Data URI or external URL */
+    readonly imageUrl?: string;
+
+    /** * Present if type is 'tool-call'. Contains the AI's request to execute a function */
+    readonly toolCall?: AiToolCallDto;
+
+    /** * Present if type is 'tool-result'. Maps back to the toolCall ID */
+    readonly toolCallId?: string;
+
+    /** * Present if type is 'tool-result'. The stringified outcome of the execution */
+    readonly toolResult?: string;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-message.dto.ts
+import { AiMessagePartDto } from './ai-message-part.dto';
+
+/**
+ * Standardized multimodal message format for AI Agent interactions.
+ * Upgraded from a simple string 'content' to a robust array of 'parts',
+ * fully supporting Vision, Tools, and complex contextual reasoning.
  */
 export interface AiMessageDto {
-    /** * The role of the message author. 'tool' is used when providing function execution results. */
     readonly role: 'system' | 'user' | 'assistant' | 'tool';
 
-    /** * The text content of the message. Can be empty if the message is purely a tool call. */
-    readonly content: string;
-
-    /** * Present if the assistant is requesting to execute one or more tools. */
-    readonly toolCalls?: AiToolCallDto[];
-
-    /** * Present ONLY if the role is 'tool'. Links the result back to the specific execution request. */
-    readonly toolCallId?: string;
+    /** * The multimodal payload of the message. 
+     * Replaces the legacy flat string 'content'. 
+     */
+    readonly parts: AiMessagePartDto[];
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\contracts\dtos\ai-profile-entity.entity.ts
@@ -716,6 +774,22 @@ export interface AiToolDto {
      * A JSON Schema object defining the strict properties and types the function accepts.
      */
     readonly parameters: Record<string, any>;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\contracts\dtos\structured-tool-result.dto.ts
+/**
+ * The strict return signature required from all registered AI tools.
+ * Prevents "Blind Error Loops" by clearly separating logical business errors 
+ * from successful executions, guiding the Agent on how to proceed.
+ */
+export interface StructuredToolResultDto {
+    readonly status: 'success' | 'retryable_error' | 'fatal_error';
+
+    /** * The resulting data if successful. Will be stringified internally for the AI. */
+    readonly data?: any;
+
+    /** * A clear error message intended for the AI to read and understand what went wrong. */
+    readonly errorMessage?: string;
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\contracts\dtos\vault-entity.entity.ts
@@ -854,6 +928,22 @@ export interface IQuery<TResult> extends IMessage {
      * ensuring maximum read performance.
      */
     readonly isQuery: true;
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\contracts\interfaces\tool-execution-context.interface.ts
+import { Injector } from '@angular/core';
+
+/**
+ * Context injected into every executed Tool Handler.
+ * Resolves JavaScript 'this' binding traps by providing native Angular 
+ * Dependency Injection and execution lifecycle controls directly to the tool.
+ */
+export interface IToolExecutionContext {
+    /** * Allows the tool to dynamically resolve required Angular Services (e.g., Repositories) */
+    readonly injector: Injector;
+
+    /** * Allows the tool to gracefully abort long-running tasks if the parent stream is cancelled */
+    readonly abortSignal?: AbortSignal;
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\database\constants\os-schemas.constant.ts
@@ -1226,6 +1316,27 @@ export class CoreEngineService {
       throw error;
     }
   }
+}
+------------------------------
+Relative Path: \projects\arena-core\src\lib\exceptions\framework-error.exception.ts
+/**
+ * The unified base exception for all Core Framework errors.
+ * Enables the Agent Executor and Middlewares to make smart decisions 
+ * based on the 'isRetryable' flag instead of parsing string messages.
+ */
+export class FrameworkError extends Error {
+    constructor(
+        public readonly code: string,
+        message: string,
+        public readonly isRetryable: boolean = false,
+        public readonly originalError?: unknown
+    ) {
+        super(message);
+        this.name = 'FrameworkError';
+
+        // Maintain proper prototype chain for instance checks (instanceof)
+        Object.setPrototypeOf(this, FrameworkError.prototype);
+    }
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\mediator\core-bus.service.ts
@@ -1789,6 +1900,9 @@ export class SystemPortabilityService {
 Relative Path: \projects\arena-core\src\public-api.ts
 /*
  * Public API Surface of arena-core
+ * CRITICAL: Only export contracts, DTOs, and orchestrator services.
+ * Internal infrastructure (e.g., CryptoService, Repositories, SchemaManager) 
+ * MUST remain hidden to prevent tight coupling and secure the framework.
  */
 
 // 1. Core Engine & Ecosystem
@@ -1796,11 +1910,11 @@ export * from './lib/engine/core-engine.service';
 export * from './lib/contracts/interfaces/app-plugin.interface';
 export * from './lib/system/system-portability.service';
 
-// 2. Monitoring
+// 2. Monitoring & State
 export * from './lib/monitor/system-monitor.service';
 export * from './lib/monitor/ai-connection-monitor.service';
 
-// 3. Mediator & Database
+// 3. Mediator & Database (Public Base Classes)
 export * from './lib/mediator/core-bus.service';
 export * from './lib/contracts/interfaces/message.interface';
 export * from './lib/contracts/interfaces/command.interface';
@@ -1808,21 +1922,29 @@ export * from './lib/contracts/interfaces/query.interface';
 export * from './lib/contracts/interfaces/message-handler.interface';
 export * from './lib/database/base-repository.class';
 
-// 4. AI Gateway & Contracts
+// 4. AI Gateway & Agent Architecture
 export * from './lib/ai/ai-gateway.service';
 export * from './lib/ai/adapters/google-gemini.adapter';
 export * from './lib/ai/agent/ai-tool-registry.service';
 export * from './lib/ai/agent/agent-executor.service';
+
+// 4.1 AI Interfaces
 export * from './lib/contracts/interfaces/ai-adapter.interface';
+export * from './lib/contracts/interfaces/tool-execution-context.interface';
+
+// 4.2 AI DTOs
 export * from './lib/contracts/dtos/ai-request.dto';
 export * from './lib/contracts/dtos/ai-response.dto';
 export * from './lib/contracts/dtos/ai-message.dto';
+export * from './lib/contracts/dtos/ai-message-part.dto';
 export * from './lib/contracts/dtos/ai-tool.dto';
 export * from './lib/contracts/dtos/ai-tool-call.dto';
+export * from './lib/contracts/dtos/structured-tool-result.dto';
 export * from './lib/contracts/dtos/ai-profile-entity.entity';
 export * from './lib/contracts/dtos/ai-capabilities.dto';
 export * from './lib/contracts/dtos/ai-event.dto';
 
-// 5. Security
+// 5. Security & Exceptions
 export * from './lib/security/security.service';
+export * from './lib/exceptions/framework-error.exception';
 ------------------------------
