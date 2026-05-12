@@ -157,6 +157,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
   // --- Internal Data Mapping Utilities ---
 
+  // --- Internal Data Mapping Utilities ---
+
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
       contents: request.messages.map(msg => {
@@ -166,17 +168,24 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
         const parts: any[] = [];
 
-        if (msg.role === 'tool' && msg.toolCallId) {
-          parts.push({
-            functionResponse: { name: msg.toolCallId, response: { result: msg.content } }
-          });
-        } else if (msg.toolCalls && msg.toolCalls.length > 0) {
-          msg.toolCalls.forEach(call => {
-            parts.push({ functionCall: { name: call.name, args: call.arguments } });
-          });
-        } else {
-          parts.push({ text: msg.content });
-        }
+        // Advanced Multimodal Mapping
+        msg.parts.forEach(p => {
+          if (p.type === 'text' && p.text) {
+            parts.push({ text: p.text });
+          } else if (p.type === 'tool-call' && p.toolCall) {
+            parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
+          } else if (p.type === 'tool-result' && p.toolCallId) {
+            parts.push({ functionResponse: { name: p.toolCallId, response: { result: p.toolResult } } });
+          } else if (p.type === 'image' && p.imageUrl) {
+            // Safely parse standard Data URIs (data:image/png;base64,iVBORw...)
+            const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+            if (match) {
+              parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+            } else {
+              console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
+            }
+          }
+        });
 
         return { role, parts };
       }),

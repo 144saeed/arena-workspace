@@ -8,6 +8,7 @@ import { SecurityService } from '../security/security.service';
 import { AiProfileRepository } from '../database/repositories/ai-profile-repository.repository';
 import { CryptoService } from '../security/crypto.service';
 import { AiConnectionMonitorService } from '../monitor/ai-connection-monitor.service';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 /**
  * The Central Communication Hub for all AI operations.
@@ -94,12 +95,24 @@ export class AiGatewayService {
     return { adapter, decryptedKey, model: profile.selectedModel, profileId: profile.profileId };
   }
 
+  // اضافه کردن این ایمپورت به بالای فایل
+  // import { FrameworkError } from '../../exceptions/framework-error.exception';
+
   private handleConnectionError(error: any, profileId: string): Observable<never> {
     const errorMsg = String(error).toLowerCase();
-    const state = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401')
-      ? 'InvalidKey'
-      : 'Disconnected';
+    const isAuthError = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401');
+    const state = isAuthError ? 'InvalidKey' : 'Disconnected';
+    
     this.connectionMonitor.updateState(profileId, state);
-    return throwError(() => error);
+    
+    // Wrap native errors in the standardized FrameworkError
+    const frameworkError = new FrameworkError(
+        isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
+        error.message || 'AI Connection failed',
+        !isAuthError, // Network errors are potentially retryable, Auth errors are not
+        error
+    );
+
+    return throwError(() => frameworkError);
   }
 }
