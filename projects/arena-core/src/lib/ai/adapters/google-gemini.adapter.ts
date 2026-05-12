@@ -51,7 +51,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  generateResponse(request: AiRequestDto, apiKey: string): Observable<AiResponseDto> {
+  generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     const endpoint = `${this.BASE_URL}/${request.model}:generateContent?key=${apiKey}`;
     const payload = this.mapRequestToGeminiFormat(request);
 
@@ -59,7 +59,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: abortSignal // SECURITY/PERF FIX: Connect AbortSignal to native fetch
       }).then(async res => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
@@ -70,11 +71,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  /**
-   * Executes a streaming request using Server-Sent Events (SSE).
-   * Implements an AbortController so if the RxJS subscription is cancelled, 
-   * the active network request is immediately aborted to save user tokens and bandwidth.
-   */
   generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto> {
     return new Observable<AiEventDto>(subscriber => {
       const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
@@ -103,7 +99,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
-          buffer = lines.pop() || ''; // Keep the incomplete line in buffer
+          buffer = lines.pop() || '';
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
@@ -123,7 +119,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   if (part.text) chunkText += part.text;
                   if (part.functionCall) {
                     toolCalls.push({
-                      id: part.functionCall.name,
+                      id: crypto.randomUUID(), // FIX: Generate unique ID to prevent agent confusion
                       name: part.functionCall.name,
                       arguments: part.functionCall.args
                     });
@@ -150,44 +146,60 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         }
       });
 
-      // Cleanup logic: Cancel the network request if the app unsubscribes
       return () => abortController.abort();
     });
   }
 
-  // --- Internal Data Mapping Utilities ---
-
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
-      contents: request.messages.map(msg => {
-        let role = 'user';
-        if (msg.role === 'assistant') role = 'model';
-        if (msg.role === 'tool') role = 'function';
-
-        const parts: any[] = [];
-
-        // Advanced Multimodal Mapping
-        msg.parts.forEach(p => {
-          if (p.type === 'text' && p.text) {
-            parts.push({ text: p.text });
-          } else if (p.type === 'tool-call' && p.toolCall) {
-            parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
-          } else if (p.type === 'tool-result' && p.toolCallId) {
-            parts.push({ functionResponse: { name: p.toolCallId, response: { result: p.toolResult } } });
-          } else if (p.type === 'image' && p.imageUrl) {
-            // Safely parse standard Data URIs (data:image/png;base64,iVBORw...)
-            const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-            if (match) {
-              parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-            } else {
-              console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
-            }
-          }
-        });
-        return { role, parts };
-      }),
+      contents: [],
       generationConfig: { temperature: request.temperature || 0.7 }
     };
+
+    // FIX: Isolate system messages into the native 'systemInstruction' property
+    const systemMessages = request.messages.filter(m => m.role === 'system');
+    const conversationalMessages = request.messages.filter(m => m.role !== 'system');
+
+    if (systemMessages.length > 0) {
+      payload.systemInstruction = {
+        parts: systemMessages.flatMap(m =>
+          m.parts.filter(p => p.type === 'text').map(p => ({ text: p.text }))
+        )
+      };
+    }
+
+    payload.contents = conversationalMessages.map(msg => {
+      let role = 'user';
+      if (msg.role === 'assistant') role = 'model';
+      if (msg.role === 'tool') role = 'function';
+
+      const parts: any[] = [];
+
+      msg.parts.forEach(p => {
+        if (p.type === 'text' && p.text) {
+          parts.push({ text: p.text });
+        } else if (p.type === 'tool-call' && p.toolCall) {
+          parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
+        } else if (p.type === 'tool-result' && p.toolCallId) {
+          // FIX: Parse structured object instead of nesting in 'result' key
+          let parsedResponse = {};
+          try {
+            parsedResponse = p.toolResult ? JSON.parse(p.toolResult) : {};
+          } catch (e) {
+            parsedResponse = { message: p.toolResult };
+          }
+          parts.push({ functionResponse: { name: p.toolCallId, response: parsedResponse } });
+        } else if (p.type === 'image' && p.imageUrl) {
+          const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+          if (match) {
+            parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+          } else {
+            console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
+          }
+        }
+      });
+      return { role, parts };
+    });
 
     if (request.tools && request.tools.length > 0) {
       payload.tools = [{
@@ -216,7 +228,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
-          id: part.functionCall.name,
+          id: crypto.randomUUID(), // FIX: Ensure unique IDs for non-streaming mode too
           name: part.functionCall.name,
           arguments: part.functionCall.args
         });

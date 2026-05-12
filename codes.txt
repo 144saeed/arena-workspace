@@ -52,7 +52,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  generateResponse(request: AiRequestDto, apiKey: string): Observable<AiResponseDto> {
+  generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     const endpoint = `${this.BASE_URL}/${request.model}:generateContent?key=${apiKey}`;
     const payload = this.mapRequestToGeminiFormat(request);
 
@@ -60,7 +60,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: abortSignal // SECURITY/PERF FIX: Connect AbortSignal to native fetch
       }).then(async res => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
@@ -71,11 +72,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  /**
-   * Executes a streaming request using Server-Sent Events (SSE).
-   * Implements an AbortController so if the RxJS subscription is cancelled, 
-   * the active network request is immediately aborted to save user tokens and bandwidth.
-   */
   generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto> {
     return new Observable<AiEventDto>(subscriber => {
       const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
@@ -104,7 +100,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
-          buffer = lines.pop() || ''; // Keep the incomplete line in buffer
+          buffer = lines.pop() || '';
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
@@ -124,7 +120,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   if (part.text) chunkText += part.text;
                   if (part.functionCall) {
                     toolCalls.push({
-                      id: part.functionCall.name,
+                      id: crypto.randomUUID(), // FIX: Generate unique ID to prevent agent confusion
                       name: part.functionCall.name,
                       arguments: part.functionCall.args
                     });
@@ -151,44 +147,60 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         }
       });
 
-      // Cleanup logic: Cancel the network request if the app unsubscribes
       return () => abortController.abort();
     });
   }
 
-  // --- Internal Data Mapping Utilities ---
-
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
-      contents: request.messages.map(msg => {
-        let role = 'user';
-        if (msg.role === 'assistant') role = 'model';
-        if (msg.role === 'tool') role = 'function';
-
-        const parts: any[] = [];
-
-        // Advanced Multimodal Mapping
-        msg.parts.forEach(p => {
-          if (p.type === 'text' && p.text) {
-            parts.push({ text: p.text });
-          } else if (p.type === 'tool-call' && p.toolCall) {
-            parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
-          } else if (p.type === 'tool-result' && p.toolCallId) {
-            parts.push({ functionResponse: { name: p.toolCallId, response: { result: p.toolResult } } });
-          } else if (p.type === 'image' && p.imageUrl) {
-            // Safely parse standard Data URIs (data:image/png;base64,iVBORw...)
-            const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-            if (match) {
-              parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-            } else {
-              console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
-            }
-          }
-        });
-        return { role, parts };
-      }),
+      contents: [],
       generationConfig: { temperature: request.temperature || 0.7 }
     };
+
+    // FIX: Isolate system messages into the native 'systemInstruction' property
+    const systemMessages = request.messages.filter(m => m.role === 'system');
+    const conversationalMessages = request.messages.filter(m => m.role !== 'system');
+
+    if (systemMessages.length > 0) {
+      payload.systemInstruction = {
+        parts: systemMessages.flatMap(m =>
+          m.parts.filter(p => p.type === 'text').map(p => ({ text: p.text }))
+        )
+      };
+    }
+
+    payload.contents = conversationalMessages.map(msg => {
+      let role = 'user';
+      if (msg.role === 'assistant') role = 'model';
+      if (msg.role === 'tool') role = 'function';
+
+      const parts: any[] = [];
+
+      msg.parts.forEach(p => {
+        if (p.type === 'text' && p.text) {
+          parts.push({ text: p.text });
+        } else if (p.type === 'tool-call' && p.toolCall) {
+          parts.push({ functionCall: { name: p.toolCall.name, args: p.toolCall.arguments } });
+        } else if (p.type === 'tool-result' && p.toolCallId) {
+          // FIX: Parse structured object instead of nesting in 'result' key
+          let parsedResponse = {};
+          try {
+            parsedResponse = p.toolResult ? JSON.parse(p.toolResult) : {};
+          } catch (e) {
+            parsedResponse = { message: p.toolResult };
+          }
+          parts.push({ functionResponse: { name: p.toolCallId, response: parsedResponse } });
+        } else if (p.type === 'image' && p.imageUrl) {
+          const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+          if (match) {
+            parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+          } else {
+            console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
+          }
+        }
+      });
+      return { role, parts };
+    });
 
     if (request.tools && request.tools.length > 0) {
       payload.tools = [{
@@ -217,7 +229,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
-          id: part.functionCall.name,
+          id: crypto.randomUUID(), // FIX: Ensure unique IDs for non-streaming mode too
           name: part.functionCall.name,
           arguments: part.functionCall.args
         });
@@ -284,7 +296,8 @@ export class AgentExecutorService {
 
       iterationCount++;
 
-      const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId));
+      // SECURITY/PERF FIX: Pass abortSignal down to the gateway to halt native fetch requests
+      const response = await firstValueFrom(this.gateway.dispatch(currentRequest, targetProfileId, abortSignal));
 
       if (!response) {
         throw new FrameworkError('AGENT_EMPTY_RESPONSE', 'Execution failed: AI returned an empty response.', true);
@@ -459,12 +472,13 @@ export class AiGatewayService {
 
   /**
    * Dispatches a request for a complete, single-turn response.
+   * Passes the AbortSignal down to the adapter layer for native network cancellation.
    */
-  dispatch(request: AiRequestDto, targetProfileId?: string): Observable<AiResponseDto> {
+  dispatch(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
       switchMap(({ adapter, decryptedKey, model, profileId }) => {
         const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        return adapter.generateResponse(finalRequest, decryptedKey).pipe(
+        return adapter.generateResponse(finalRequest, decryptedKey, abortSignal).pipe(
           tap(() => this.connectionMonitor.updateState(profileId, 'Connected')),
           catchError((error) => this.handleConnectionError(error, profileId)),
           finalize(() => { decryptedKey = ''; })
@@ -475,7 +489,6 @@ export class AiGatewayService {
 
   /**
    * Dispatches a request and returns a continuous stream of AI events (SSE).
-   * Excellent for real-time chat UX and interruptible operations.
    */
   dispatchStream(request: AiRequestDto, targetProfileId?: string): Observable<AiEventDto> {
     return from(this.prepareSecureContext(targetProfileId)).pipe(
@@ -484,7 +497,6 @@ export class AiGatewayService {
         return adapter.generateStream(finalRequest, decryptedKey).pipe(
           tap({
             next: (event) => {
-              // Only update on meaningful chunks to avoid rapid signal firing
               if (event.type === 'chunk' || event.type === 'complete') {
                 this.connectionMonitor.updateState(profileId, 'Connected');
               }
@@ -515,7 +527,7 @@ export class AiGatewayService {
       : await this.profileRepo.getActiveProfile();
 
     if (!profile) {
-      throw new Error(`[AI Gateway] Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`);
+      throw new FrameworkError('AI_PROFILE_NOT_FOUND', `Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`, false);
     }
 
     const masterKey = this.securityService.getSessionKey();
@@ -525,22 +537,18 @@ export class AiGatewayService {
     return { adapter, decryptedKey, model: profile.selectedModel, profileId: profile.profileId };
   }
 
-  // اضافه کردن این ایمپورت به بالای فایل
-  // import { FrameworkError } from '../../exceptions/framework-error.exception';
-
   private handleConnectionError(error: any, profileId: string): Observable<never> {
     const errorMsg = String(error).toLowerCase();
     const isAuthError = errorMsg.includes('key') || errorMsg.includes('unauthorized') || errorMsg.includes('401');
     const state = isAuthError ? 'InvalidKey' : 'Disconnected';
-    
+
     this.connectionMonitor.updateState(profileId, state);
-    
-    // Wrap native errors in the standardized FrameworkError
+
     const frameworkError = new FrameworkError(
-        isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
-        error.message || 'AI Connection failed',
-        !isAuthError, // Network errors are potentially retryable, Auth errors are not
-        error
+      isAuthError ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR',
+      error.message || 'AI Connection failed',
+      !isAuthError,
+      error
     );
 
     return throwError(() => frameworkError);
@@ -828,8 +836,10 @@ export interface IAiAdapter {
     validateKey(apiKey: string): Observable<boolean>;
     fetchModels(apiKey: string): Observable<string[]>;
 
-    /** * Executes a standard, single-turn full response (Best for JSON/Data extraction) */
-    generateResponse(request: AiRequestDto, apiKey: string): Observable<AiResponseDto>;
+    /** * Executes a standard, single-turn full response (Best for JSON/Data extraction).
+     * Now strictly supports AbortSignal for network-level cancellation.
+     */
+    generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto>;
 
     /** * Executes a Server-Sent Events (SSE) stream returning continuous chunks (Best for Chat/UX) */
     generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto>;
@@ -1151,6 +1161,7 @@ Relative Path: \projects\arena-core\src\lib\database\schema-manager.service.ts
 import { Injectable } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 interface DbMetaRecord {
   id: number;
@@ -1181,9 +1192,6 @@ export class SchemaManagerService {
   private readonly metaDb = new MetaDatabase();
   private _systemTables: string[] = [];
 
-  /**
-   * Returns a list of strictly protected OS tables.
-   */
   public get systemTables(): string[] {
     return this._systemTables;
   }
@@ -1192,17 +1200,20 @@ export class SchemaManagerService {
     const combinedSchema: Record<string, string> = {};
     const allSchemas = [...coreSchemas, ...pluginSchemas];
 
-    // Identify and cache system tables
     this._systemTables = allSchemas.filter(s => s.isSystem).map(s => s.tableName);
 
     allSchemas.forEach(schema => {
       if (combinedSchema[schema.tableName]) {
-        console.warn(`[Schema Manager] Warning: Overwriting existing table schema for: ${schema.tableName}`);
+        // SECURITY/DATA-INTEGRITY FIX: Throw hard error on table name collisions
+        throw new FrameworkError(
+          'DB_SCHEMA_COLLISION',
+          `Critical Error: Multiple plugins attempted to register the same table name '${schema.tableName}'. This will cause data corruption.`,
+          false
+        );
       }
       combinedSchema[schema.tableName] = schema.schemaDefinition;
     });
 
-    // Sort keys alphabetically to guarantee deterministic JSON.stringify output
     const sortedKeys = Object.keys(combinedSchema).sort();
     const sortedSchema: Record<string, string> = {};
     sortedKeys.forEach(key => {
@@ -1773,6 +1784,7 @@ import { Injectable } from '@angular/core';
 import { CoreDatabaseService } from '../database/core-database.service';
 import { SecurityService } from '../security/security.service';
 import { SchemaManagerService } from '../database/schema-manager.service';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 /**
  * Manages the import, export, and destruction of the entire OS ecosystem.
@@ -1789,13 +1801,9 @@ export class SystemPortabilityService {
     private readonly schemaManager: SchemaManagerService
   ) { }
 
-  /**
-   * Exports the entire database (OS tables + Plugin tables) into a serialized JSON string.
-   * @returns A JSON string representing the entire application state.
-   */
   async exportEcosystem(): Promise<string> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new Error('[Portability] Cannot export data while the vault is locked.');
+      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot export data while the vault is locked.', false);
     }
 
     const exportData: Record<string, any[]> = {};
@@ -1809,22 +1817,21 @@ export class SystemPortabilityService {
     return JSON.stringify(exportData);
   }
 
-  /**
-   * Imports a previously exported ecosystem state, completely overwriting current data.
-   * Wrapped in a transaction to prevent data corruption if the import fails midway.
-   * @param jsonString The JSON string generated by exportEcosystem().
-   */
   async importEcosystem(jsonString: string): Promise<void> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new Error('[Portability] Cannot import data while the vault is locked.');
+      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot import data while the vault is locked.', false);
     }
 
     try {
       const parsedData: Record<string, any[]> = JSON.parse(jsonString);
-      const tables = this.dbEngine.tables;
 
-      await this.dbEngine.transaction('rw', tables, async () => {
-        for (const table of tables) {
+      // SECURITY FIX: Filter out strictly protected OS tables so a malicious 
+      // backup file cannot overwrite the Master Vault or AI Profiles.
+      const systemTables = this.schemaManager.systemTables;
+      const safeTablesToImport = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
+
+      await this.dbEngine.transaction('rw', safeTablesToImport, async () => {
+        for (const table of safeTablesToImport) {
           if (parsedData[table.name]) {
             await table.clear();
             await table.bulkPut(parsedData[table.name]);
@@ -1832,23 +1839,18 @@ export class SystemPortabilityService {
         }
       });
 
-      console.log('[Portability] Ecosystem imported and restored successfully.');
+      console.log('[Portability] Ecosystem imported and restored successfully (System tables were protected).');
     } catch (error) {
       console.error('[Portability] Failed to import ecosystem. Data might be corrupted.', error);
-      throw new Error('[Portability] Import failed. Invalid file format or database error.');
+      throw new FrameworkError('IMPORT_FAILED', '[Portability] Import failed. Invalid file format or database error.', false, error);
     }
   }
 
-  /**
-   * Clears all plugin-generated data but retains OS security and AI configurations.
-   * The user remains logged in, but their app-specific progress is wiped.
-   */
   async softReset(): Promise<void> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new Error('[Portability] Cannot perform a soft reset while the vault is locked.');
+      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot perform a soft reset while the vault is locked.', false);
     }
 
-    // Retrieve strictly protected tables directly from the Schema Manager
     const systemTables = this.schemaManager.systemTables;
     const tablesToClear = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
 
@@ -1861,43 +1863,31 @@ export class SystemPortabilityService {
     console.log('[Portability] Soft reset complete. Plugin data wiped. OS state retained.');
   }
 
-  /**
-   * The Nuclear Option.
-   * Destroys all databases (Main and Meta), locks the vault, and reloads the application.
-   * Returns the framework to its absolute initial install state.
-   */
   async factoryReset(): Promise<void> {
     console.warn('[Portability] INITIATING FACTORY RESET...');
-
-    // 1. Lock the security gatekeeper and purge memory
     this.securityService.lockVault();
 
     try {
-      // 2. Close and delete the main framework database
       if (this.dbEngine.isOpen()) {
         this.dbEngine.close();
       }
       await this.dbEngine.delete();
 
-      // 3. Delete the isolated Meta Database directly via native IndexedDB API
       await new Promise<void>((resolve, reject) => {
         const req = indexedDB.deleteDatabase('ArenaMetaDb');
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);
-        req.onblocked = () => resolve(); // Proceed even if slightly blocked
+        req.onblocked = () => resolve();
       });
 
-      // 4. Clear any potential legacy local storage
       localStorage.clear();
       sessionStorage.clear();
 
       console.log('[Portability] Factory reset complete. Reloading environment...');
-
-      // 5. Force reload to re-initialize the empty OS
       window.location.reload();
     } catch (error) {
       console.error('[Portability] Critical error during factory reset:', error);
-      throw error;
+      throw new FrameworkError('FACTORY_RESET_FAILED', 'Critical error during factory reset', false, error);
     }
   }
 }
