@@ -4,6 +4,8 @@ import { map } from 'rxjs/operators';
 import { IAiAdapter } from '../../contracts/interfaces/ai-adapter.interface';
 import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
+import { AiEventDto } from '../../contracts/dtos/ai-event.dto';
+import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
 
 /**
  * The official AI Adapter for Google Gemini APIs.
@@ -15,26 +17,24 @@ import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
 })
 export class GoogleGeminiAdapter implements IAiAdapter {
 
-  // Static metadata required by the AiRegistryService (Factory Pattern)
   public static readonly providerId = 'google-gemini';
   public static readonly displayName = 'Google Gemini';
 
+  public static readonly capabilities: AiCapabilitiesDto = {
+    supportsStreaming: true,
+    supportsTools: true,
+    supportsVision: false, // Update to true when vision payload mapping is implemented
+    supportsJsonMode: true
+  };
+
   private readonly BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-  /**
-   * Validates the provided API key by attempting to fetch the model list.
-   */
   validateKey(apiKey: string): Observable<boolean> {
     return from(
       fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
-    ).pipe(
-      map(response => response.status === 200)
-    );
+    ).pipe(map(response => response.status === 200));
   }
 
-  /**
-   * Fetches all available generative models (filtering out non-text/generation models).
-   */
   fetchModels(apiKey: string): Observable<string[]> {
     return from(
       fetch(`${this.BASE_URL}?key=${apiKey}`, { method: 'GET' })
@@ -51,9 +51,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
-  /**
-   * Executes a prompt and handles Function Calling (Tools) mapping.
-   */
   generateResponse(request: AiRequestDto, apiKey: string): Observable<AiResponseDto> {
     const endpoint = `${this.BASE_URL}/${request.model}:generateContent?key=${apiKey}`;
     const payload = this.mapRequestToGeminiFormat(request);
@@ -65,9 +62,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         body: JSON.stringify(payload)
       }).then(async res => {
         const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
-        }
+        if (!res.ok) throw new Error(data.error?.message || '[Gemini Adapter] Unknown execution error.');
         return data;
       })
     ).pipe(
@@ -75,50 +70,119 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
+  /**
+   * Executes a streaming request using Server-Sent Events (SSE).
+   * Implements an AbortController so if the RxJS subscription is cancelled, 
+   * the active network request is immediately aborted to save user tokens and bandwidth.
+   */
+  generateStream(request: AiRequestDto, apiKey: string): Observable<AiEventDto> {
+    return new Observable<AiEventDto>(subscriber => {
+      const endpoint = `${this.BASE_URL}/${request.model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+      const payload = this.mapRequestToGeminiFormat(request);
+      const abortController = new AbortController();
+
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: abortController.signal
+      }).then(async response => {
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || '[Gemini Adapter] Streaming execution error.');
+        }
+        if (!response.body) throw new Error('[Gemini Adapter] No response body for streaming.');
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep the incomplete line in buffer
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.replace('data: ', '').trim();
+              if (!dataStr) continue;
+
+              try {
+                const parsed = JSON.parse(dataStr);
+                const candidate = parsed.candidates?.[0];
+                if (!candidate) continue;
+
+                const parts = candidate.content?.parts || [];
+                let chunkText = '';
+                const toolCalls: any[] = [];
+
+                parts.forEach((part: any) => {
+                  if (part.text) chunkText += part.text;
+                  if (part.functionCall) {
+                    toolCalls.push({
+                      id: part.functionCall.name,
+                      name: part.functionCall.name,
+                      arguments: part.functionCall.args
+                    });
+                  }
+                });
+
+                if (chunkText) {
+                  subscriber.next({ type: 'chunk', content: chunkText });
+                }
+                if (toolCalls.length > 0) {
+                  subscriber.next({ type: 'tool-call', toolCalls });
+                }
+              } catch (e) {
+                console.warn('[Gemini Adapter] Failed to parse stream chunk', e);
+              }
+            }
+          }
+        }
+        subscriber.next({ type: 'complete' });
+        subscriber.complete();
+      }).catch(error => {
+        if (error.name !== 'AbortError') {
+          subscriber.error(error);
+        }
+      });
+
+      // Cleanup logic: Cancel the network request if the app unsubscribes
+      return () => abortController.abort();
+    });
+  }
+
   // --- Internal Data Mapping Utilities ---
 
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
     const payload: any = {
       contents: request.messages.map(msg => {
-
-        // Handle standard roles
         let role = 'user';
         if (msg.role === 'assistant') role = 'model';
-        if (msg.role === 'tool') role = 'function'; // Gemini specific mapping
+        if (msg.role === 'tool') role = 'function';
 
         const parts: any[] = [];
 
         if (msg.role === 'tool' && msg.toolCallId) {
-          // Send tool execution results back to Gemini
           parts.push({
-            functionResponse: {
-              name: msg.toolCallId,
-              response: { result: msg.content }
-            }
+            functionResponse: { name: msg.toolCallId, response: { result: msg.content } }
           });
         } else if (msg.toolCalls && msg.toolCalls.length > 0) {
-          // Assistant requesting tool execution
           msg.toolCalls.forEach(call => {
-            parts.push({
-              functionCall: {
-                name: call.name,
-                args: call.arguments
-              }
-            });
+            parts.push({ functionCall: { name: call.name, args: call.arguments } });
           });
         } else {
-          // Standard text message
           parts.push({ text: msg.content });
         }
 
         return { role, parts };
       }),
-      generationConfig: {
-        temperature: request.temperature || 0.7
-      }
+      generationConfig: { temperature: request.temperature || 0.7 }
     };
 
-    // Inject Tool Declarations if the framework provided them
     if (request.tools && request.tools.length > 0) {
       payload.tools = [{
         functionDeclarations: request.tools.map(t => ({
@@ -144,12 +208,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const toolCalls: any[] = [];
 
     parts.forEach((part: any) => {
-      if (part.text) {
-        content += part.text;
-      }
+      if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
-          id: part.functionCall.name, // Gemini relies on the name for correlation
+          id: part.functionCall.name,
           name: part.functionCall.name,
           arguments: part.functionCall.args
         });

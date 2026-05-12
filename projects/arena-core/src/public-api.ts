@@ -29,6 +29,8 @@ export * from './lib/contracts/dtos/ai-message.dto';
 export * from './lib/contracts/dtos/ai-tool.dto';
 export * from './lib/contracts/dtos/ai-tool-call.dto';
 export * from './lib/contracts/dtos/ai-profile-entity.entity';
+export * from './lib/contracts/dtos/ai-capabilities.dto';
+export * from './lib/contracts/dtos/ai-event.dto';
 
 // 5. Security
 export * from './lib/security/security.service';
