@@ -29,7 +29,6 @@ export class SystemPortabilityService {
       exportData[table.name] = await table.toArray();
     }
 
-    // SECURITY FIX: Encrypt the entire export payload to protect sensitive user data
     const rawJson = JSON.stringify(exportData);
     const masterKey = this.securityService.getSessionKey();
     const { cipherTextHex, ivHex } = await this.cryptoService.encrypt(rawJson, masterKey);
@@ -43,20 +42,28 @@ export class SystemPortabilityService {
     }
 
     try {
-      const parsedWrap = JSON.parse(jsonString);
-      let payloadStr = jsonString;
-
-      // Handle Decryption if format is the new secure encrypted export
-      if (parsedWrap.isArenaEncryptedExport) {
-        const masterKey = this.securityService.getSessionKey();
-        payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
+      let parsedWrap;
+      try {
+        parsedWrap = JSON.parse(jsonString);
+      } catch (e) {
+        throw new Error('Malformed JSON string.');
       }
 
+      // SECURITY FIX: Reject legacy plain-text backups to enforce security
+      if (!parsedWrap.isArenaEncryptedExport || !parsedWrap.data || !parsedWrap.ivHex) {
+        throw new FrameworkError('INSECURE_IMPORT', 'Plain-text or invalid backups are rejected for security reasons.', false);
+      }
+
+      const masterKey = this.securityService.getSessionKey();
+      const payloadStr = await this.cryptoService.decrypt(parsedWrap.data, parsedWrap.ivHex, masterKey);
       const parsedData: Record<string, any[]> = JSON.parse(payloadStr);
 
-      // SECURITY FIX: Prevent malformed payload crashes
+      // SECURITY FIX: Prevent Prototype Pollution and DOS via malformed structures
       if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
         throw new Error('Invalid export format structure.');
+      }
+      if ('__proto__' in parsedData || 'constructor' in parsedData) {
+        throw new Error('Malicious prototype pollution payload detected.');
       }
 
       const systemTables = this.schemaManager.systemTables;
@@ -74,7 +81,7 @@ export class SystemPortabilityService {
       console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
       console.error('[Portability] Failed to import ecosystem:', error);
-      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or wrong encryption key.', false, error);
+      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format, structural corruption, or wrong encryption key.', false, error);
     }
   }
 
@@ -94,8 +101,6 @@ export class SystemPortabilityService {
 
   async factoryReset(): Promise<void> {
     console.warn('[Portability] INITIATING FACTORY RESET...');
-    // ARCHITECTURE NOTE: We explicitly DO NOT require vault authentication here.
-    // This is the emergency escape hatch for users who lost their master password.
     this.securityService.lockVault();
 
     try {

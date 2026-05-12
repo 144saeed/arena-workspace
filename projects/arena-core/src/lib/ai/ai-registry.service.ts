@@ -1,5 +1,6 @@
 import { Injectable, Injector } from '@angular/core';
 import { IAiAdapter, AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
+import { FrameworkError } from '../exceptions/framework-error.exception';
 
 /**
  * The Central Registry & Factory for AI Adapters in the Framework.
@@ -23,7 +24,12 @@ export class AiRegistryService {
     const name = adapterClass.displayName;
 
     if (this.adapterClasses.has(id)) {
-      console.warn(`[AI Registry] Overwriting existing adapter class for: ${id}`);
+      // SECURITY FIX: Prevent malicious adapter overriding
+      throw new FrameworkError(
+        'ADAPTER_COLLISION',
+        `Critical Error: An AI Adapter with the provider ID '${id}' is already registered. Overriding is strictly prohibited for security reasons.`,
+        false
+      );
     }
 
     this.adapterClasses.set(id, adapterClass);
@@ -36,6 +42,7 @@ export class AiRegistryService {
    */
   createAdapterInstance(providerId: string): IAiAdapter {
     const AdapterClass = this.adapterClasses.get(providerId);
+
     if (!AdapterClass) {
       throw new Error(`[AI Registry] Critical Error: No adapter registered for provider '${providerId}'`);
     }
