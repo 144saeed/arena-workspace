@@ -9,17 +9,11 @@ import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.
 import { AiRegistryService } from '../ai/ai-registry.service';
 import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
 
-/**
- * The Main Kernel of the Framework.
- * Orchestrates the full boot sequence: Database evolution, Security verification, 
- * Middleware mounting, Plugin handler registration, and AI Factory setup.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CoreEngineService {
 
-  // SECURITY FIX: Encapsulate boot state
   private readonly _isBooted = signal<boolean>(false);
   public readonly isBooted = this._isBooted.asReadonly();
 
@@ -33,44 +27,28 @@ export class CoreEngineService {
   ) { }
 
   async boot(plugins: IAppPlugin[], aiAdapters: AiAdapterConstructor[] = []): Promise<void> {
-    if (this.isBooted()) {
-      console.warn('[Core Engine] System is already booted. Ignoring duplicate boot request.');
-      return;
-    }
+    if (this.isBooted()) return;
 
     try {
-      console.log('[Core Engine] Boot sequence started...');
-
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
       await this.databaseEngine.initializeDatabase(pluginSchemas, OS_MANDATORY_SCHEMAS);
-      console.log('[Core Engine] Phase 1: Database initialized with core and plugin schemas.');
 
-      aiAdapters.forEach(adapterClass => {
-        this.aiRegistry.registerAdapter(adapterClass);
-      });
-      console.log(`[Core Engine] Phase 2: Registered ${aiAdapters.length} AI Adapters.`);
+      aiAdapters.forEach(adapterClass => this.aiRegistry.registerAdapter(adapterClass));
 
       this.coreBus.useMiddleware(this.processMonitor);
       this.coreBus.useMiddleware(this.securityGuard);
-      console.log('[Core Engine] Phase 3: System Monitor and Security Guard mounted.');
 
-      plugins.forEach(plugin => {
-        plugin.registerHandlers(this.coreBus);
-        console.log(`[Core Engine] Registered handlers for plugin: ${plugin.appId}`);
-      });
-      console.log('[Core Engine] Phase 4: All plugin handlers mounted.');
+      plugins.forEach(plugin => plugin.registerHandlers(this.coreBus));
 
       if (!this.securityService.isVaultUnlocked()) {
-        console.warn('[Core Engine] Phase 5: System is running, but Vault is LOCKED.');
-      } else {
-        console.log('[Core Engine] Phase 5: Security verified. Vault is unlocked.');
+        console.warn('[Core Engine] System is running, but Vault is locked.');
       }
 
       this._isBooted.set(true);
-      console.log('[Core Engine] Framework is fully operational.');
+      console.log('[Core Engine] Framework booted successfully.');
 
     } catch (error) {
-      console.error('[Core Engine] Critical Boot Failure:', error);
+      console.error('[Core Engine] Boot Failure:', error);
       this._isBooted.set(false);
       throw error;
     }

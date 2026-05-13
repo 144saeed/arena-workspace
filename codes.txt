@@ -36,17 +36,14 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) {
-            const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-            throw new FrameworkError(code, '[Gemini Adapter] Failed to fetch models.', res.status >= 500);
-          }
+          if (!res.ok) this.handleHttpError(res.status, null, 'Failed to fetch models.');
           return res.json();
         })
     ).pipe(
-      map((data: any) => {
+      map((data: { models: { name: string, supportedGenerationMethods: string[] }[] }) => {
         return data.models
-          .filter((m: any) => m.supportedGenerationMethods.includes('generateContent'))
-          .map((m: any) => m.name.replace('models/', ''));
+          .filter(m => m.supportedGenerationMethods.includes('generateContent'))
+          .map(m => m.name.replace('models/', ''));
       })
     );
   }
@@ -66,15 +63,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         signal: abortSignal
       }).then(async res => {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          // ARCHITECTURE FIX: Use exact HTTP status for precision error tracking
-          const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-          throw new FrameworkError(code, data.error?.message || '[Gemini Adapter] Unknown execution error.', res.status >= 500);
-        }
+        if (!res.ok) this.handleHttpError(res.status, data, 'Execution error.');
         return data;
       })
     ).pipe(
-      map((geminiResponse: any) => this.mapGeminiResponseToStandard(geminiResponse))
+      map((geminiResponse: Record<string, unknown>) => this.mapGeminiResponseToStandard(geminiResponse))
     );
   }
 
@@ -84,7 +77,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
 
-      // ARCHITECTURE FIX: Ensure listener is properly referenced for teardown
       const onAbort = () => abortController.abort();
       if (abortSignal) {
         abortSignal.addEventListener('abort', onAbort);
@@ -101,10 +93,9 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          const code = response.status === 401 || response.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-          throw new FrameworkError(code, errData.error?.message || '[Gemini Adapter] Streaming execution error.', response.status >= 500);
+          this.handleHttpError(response.status, errData, 'Streaming execution error.');
         }
-        if (!response.body) throw new Error('[Gemini Adapter] No response body for streaming.');
+        if (!response.body) throw new FrameworkError('STREAM_BODY_MISSING', 'No response body for streaming.', true);
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
@@ -130,7 +121,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
                 const parts = candidate.content?.parts || [];
                 let chunkText = '';
-                const toolCalls: any[] = [];
+                const toolCalls: Record<string, unknown>[] = [];
 
                 parts.forEach((part: any) => {
                   if (part.text) chunkText += part.text;
@@ -147,10 +138,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   subscriber.next({ type: 'chunk', content: chunkText });
                 }
                 if (toolCalls.length > 0) {
-                  subscriber.next({ type: 'tool-call', toolCalls });
+                  // Cast required to align loosely typed stream parsing with strict DTO
+                  subscriber.next({ type: 'tool-call', toolCalls: toolCalls as any });
                 }
               } catch (e) {
-                console.warn('[Gemini Adapter] Failed to parse stream chunk', e);
+                console.warn('[Gemini Adapter] Failed to parse stream chunk');
               }
             }
           }
@@ -160,10 +152,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).catch(error => {
         if (error.name !== 'AbortError') {
           subscriber.error(error);
+        } else {
+          subscriber.complete();
         }
       });
 
-      // ARCHITECTURE FIX: RxJS teardown hook ensures 100% memory leak prevention
       return () => {
         abortController.abort();
         if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
@@ -171,8 +164,14 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     });
   }
 
-  private mapRequestToGeminiFormat(request: AiRequestDto): any {
-    const payload: any = {
+  private handleHttpError(status: number, errorData: any, defaultMessage: string): never {
+    const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+    const message = errorData?.error?.message || defaultMessage;
+    throw new FrameworkError(code, message, status >= 500);
+  }
+
+  private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
       contents: [],
       generationConfig: { temperature: request.temperature ?? 0.7 }
     };
@@ -181,19 +180,19 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const conversationalMessages = request.messages.filter(m => m.role !== 'system');
 
     if (systemMessages.length > 0) {
-      payload.systemInstruction = {
+      payload['systemInstruction'] = {
         parts: systemMessages.flatMap(m =>
           m.parts.filter(p => p.type === 'text').map(p => ({ text: p.text }))
         )
       };
     }
 
-    payload.contents = conversationalMessages.map(msg => {
+    payload['contents'] = conversationalMessages.map(msg => {
       let role = 'user';
       if (msg.role === 'assistant') role = 'model';
       if (msg.role === 'tool') role = 'function';
 
-      const parts: any[] = [];
+      const parts: Record<string, unknown>[] = [];
 
       msg.parts.forEach(p => {
         if (p.type === 'text' && p.text) {
@@ -213,8 +212,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
           const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
           if (match) {
             parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-          } else {
-            console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
           }
         }
       });
@@ -222,7 +219,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     });
 
     if (request.tools && request.tools.length > 0) {
-      payload.tools = [{
+      payload['tools'] = [{
         functionDeclarations: request.tools.map(t => ({
           name: t.name,
           description: t.description,
@@ -232,7 +229,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     }
 
     if (request.expectJson) {
-      payload.generationConfig.responseMimeType = 'application/json';
+      (payload['generationConfig'] as any).responseMimeType = 'application/json';
     }
 
     return payload;
@@ -243,7 +240,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const parts = candidate?.content?.parts || [];
 
     let content = '';
-    const toolCalls: any[] = [];
+    const toolCalls: Record<string, unknown>[] = [];
+
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
@@ -254,11 +252,13 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         });
       }
     });
+
     return {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+      // Cast required to align dynamic response parsing with strict DTO
+      toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
     };
   }
 }
@@ -330,7 +330,6 @@ export class AgentExecutorService {
             const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
             if (result.status === 'fatal_error') {
-              // ARCHITECTURE FIX: Ensure safe aborting without duplicate call console warnings
               if (!batchAbortController.signal.aborted) {
                 batchAbortController.abort();
               }
@@ -356,14 +355,16 @@ export class AgentExecutorService {
             }
           }
 
+          // FIX: Throw early before mutating state to resolve design smell
+          if (hasFatalError) {
+            throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
+          }
+
           currentRequest = {
             ...currentRequest,
             messages: [...currentRequest.messages, { role: 'tool', parts: toolResultsParts }]
           };
 
-          if (hasFatalError) {
-            throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
-          }
         } finally {
           if (abortSignal) abortSignal.removeEventListener('abort', mainAbortListener);
         }
@@ -545,10 +546,6 @@ import { Injectable, Injector } from '@angular/core';
 import { IAiAdapter, AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
-/**
- * The Central Registry & Factory for AI Adapters in the Framework.
- * Pure lazy instantiation: Classes are NEVER instantiated until explicitly requested.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -559,35 +556,23 @@ export class AiRegistryService {
 
   constructor(private readonly injector: Injector) { }
 
-  /**
-   * Registers a new AI adapter class reading purely static metadata.
-   */
   registerAdapter(adapterClass: AiAdapterConstructor): void {
     const id = adapterClass.providerId;
     const name = adapterClass.displayName;
 
     if (this.adapterClasses.has(id)) {
-      // SECURITY FIX: Prevent malicious adapter overriding
-      throw new FrameworkError(
-        'ADAPTER_COLLISION',
-        `Critical Error: An AI Adapter with the provider ID '${id}' is already registered. Overriding is strictly prohibited for security reasons.`,
-        false
-      );
+      throw new FrameworkError('ADAPTER_COLLISION', `An AI Adapter with ID '${id}' is already registered.`, false);
     }
 
     this.adapterClasses.set(id, adapterClass);
     this.adapterMetadata.set(id, name);
-    console.log(`[AI Registry] Successfully registered AI Factory for: ${name}`);
   }
 
-  /**
-   * Factory Method: Creates or retrieves the instance of the requested AI Adapter.
-   */
   createAdapterInstance(providerId: string): IAiAdapter {
     const AdapterClass = this.adapterClasses.get(providerId);
 
     if (!AdapterClass) {
-      throw new Error(`[AI Registry] Critical Error: No adapter registered for provider '${providerId}'`);
+      throw new FrameworkError('ADAPTER_NOT_FOUND', `No adapter registered for provider '${providerId}'.`, false);
     }
     return this.injector.get(AdapterClass);
   }
@@ -1259,17 +1244,11 @@ import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.
 import { AiRegistryService } from '../ai/ai-registry.service';
 import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
 
-/**
- * The Main Kernel of the Framework.
- * Orchestrates the full boot sequence: Database evolution, Security verification, 
- * Middleware mounting, Plugin handler registration, and AI Factory setup.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CoreEngineService {
 
-  // SECURITY FIX: Encapsulate boot state
   private readonly _isBooted = signal<boolean>(false);
   public readonly isBooted = this._isBooted.asReadonly();
 
@@ -1283,44 +1262,28 @@ export class CoreEngineService {
   ) { }
 
   async boot(plugins: IAppPlugin[], aiAdapters: AiAdapterConstructor[] = []): Promise<void> {
-    if (this.isBooted()) {
-      console.warn('[Core Engine] System is already booted. Ignoring duplicate boot request.');
-      return;
-    }
+    if (this.isBooted()) return;
 
     try {
-      console.log('[Core Engine] Boot sequence started...');
-
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
       await this.databaseEngine.initializeDatabase(pluginSchemas, OS_MANDATORY_SCHEMAS);
-      console.log('[Core Engine] Phase 1: Database initialized with core and plugin schemas.');
 
-      aiAdapters.forEach(adapterClass => {
-        this.aiRegistry.registerAdapter(adapterClass);
-      });
-      console.log(`[Core Engine] Phase 2: Registered ${aiAdapters.length} AI Adapters.`);
+      aiAdapters.forEach(adapterClass => this.aiRegistry.registerAdapter(adapterClass));
 
       this.coreBus.useMiddleware(this.processMonitor);
       this.coreBus.useMiddleware(this.securityGuard);
-      console.log('[Core Engine] Phase 3: System Monitor and Security Guard mounted.');
 
-      plugins.forEach(plugin => {
-        plugin.registerHandlers(this.coreBus);
-        console.log(`[Core Engine] Registered handlers for plugin: ${plugin.appId}`);
-      });
-      console.log('[Core Engine] Phase 4: All plugin handlers mounted.');
+      plugins.forEach(plugin => plugin.registerHandlers(this.coreBus));
 
       if (!this.securityService.isVaultUnlocked()) {
-        console.warn('[Core Engine] Phase 5: System is running, but Vault is LOCKED.');
-      } else {
-        console.log('[Core Engine] Phase 5: Security verified. Vault is unlocked.');
+        console.warn('[Core Engine] System is running, but Vault is locked.');
       }
 
       this._isBooted.set(true);
-      console.log('[Core Engine] Framework is fully operational.');
+      console.log('[Core Engine] Framework booted successfully.');
 
     } catch (error) {
-      console.error('[Core Engine] Critical Boot Failure:', error);
+      console.error('[Core Engine] Boot Failure:', error);
       this._isBooted.set(false);
       throw error;
     }
@@ -1374,7 +1337,7 @@ export class CoreBus {
     handlerType: Type<IMessageHandler<TMessage, TResult>>
   ): void {
     if (this.handlers.has(messageType)) {
-      throw new FrameworkError('REGISTRY_COLLISION', `Critical Error: Collision detected for ${messageType.name}`, false);
+      throw new FrameworkError('REGISTRY_COLLISION', `Collision detected for handler ${messageType.name}`, false);
     }
     this.handlers.set(messageType, handlerType);
   }
@@ -1384,13 +1347,11 @@ export class CoreBus {
     const HandlerType = this.handlers.get(messageType);
 
     if (!HandlerType) {
-      throw new Error(`[Core Bus] Critical Error: No handler registered for message type '${messageType.name}'.`);
+      throw new FrameworkError('HANDLER_NOT_FOUND', `No handler registered for message type '${messageType.name}'.`, false);
     }
 
     const handlerInstance = this.injector.get(HandlerType);
 
-    // ARCHITECTURE FIX: Pass the index functionally to prevent shared-state mutations 
-    // across concurrent asynchronous middleware executions.
     const executePipeline = async (idx: number): Promise<TResult> => {
       if (idx < this.middlewares.length) {
         const currentMiddleware = this.middlewares[idx];
@@ -1755,7 +1716,7 @@ export class SystemPortabilityService {
 
   async exportEcosystem(): Promise<string> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot export data while the vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot export data while the vault is locked.', false);
     }
 
     const exportData: Record<string, any[]> = {};
@@ -1763,8 +1724,6 @@ export class SystemPortabilityService {
     const systemTables = this.schemaManager.systemTables;
 
     for (const table of tables) {
-      // ARCHITECTURE FIX: Never export system tables (os_vault, os_ai_profiles)
-      // to ensure cross-device portability without compromising security.
       if (!systemTables.includes(table.name)) {
         exportData[table.name] = await table.toArray();
       }
@@ -1775,7 +1734,7 @@ export class SystemPortabilityService {
 
   async importEcosystem(jsonString: string): Promise<void> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot import data while the vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot import data while the vault is locked.', false);
     }
 
     try {
@@ -1783,19 +1742,17 @@ export class SystemPortabilityService {
       try {
         parsedWrap = JSON.parse(jsonString);
       } catch (e) {
-        throw new Error('Malformed JSON string.');
+        throw new FrameworkError('IMPORT_PARSE_ERROR', 'Malformed JSON string.', false);
       }
 
-      // Ensure it's our designated export format
       if (!parsedWrap.isArenaExport || !parsedWrap.data) {
-        throw new Error('Invalid or legacy export file.');
+        throw new FrameworkError('IMPORT_INVALID_FORMAT', 'Invalid or legacy export file.', false);
       }
 
       const parsedData: Record<string, any[]> = parsedWrap.data;
 
-      // SECURITY FIX: Deep DOS and Prototype Pollution check
       if (typeof parsedData !== 'object' || Array.isArray(parsedData)) {
-        throw new Error('Invalid export format structure.');
+        throw new FrameworkError('IMPORT_STRUCTURAL_ERROR', 'Invalid export format structure.', false);
       }
 
       const systemTables = this.schemaManager.systemTables;
@@ -1806,9 +1763,8 @@ export class SystemPortabilityService {
           const tableData = parsedData[table.name];
 
           if (tableData && Array.isArray(tableData)) {
-            // DOS Protection: Limit records per table
             if (tableData.length > 50000) {
-              throw new Error(`Payload too large for table ${table.name}.`);
+              throw new FrameworkError('IMPORT_DOS_RISK', `Payload too large for table ${table.name}.`, false);
             }
             await table.clear();
             await table.bulkPut(tableData);
@@ -1818,14 +1774,14 @@ export class SystemPortabilityService {
 
       console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
-      console.error('[Portability] Failed to import ecosystem:', error);
-      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or data corruption detected.', false, error);
+      const isFrameworkError = error instanceof FrameworkError;
+      throw isFrameworkError ? error : new FrameworkError('IMPORT_FAILED', 'Import failed due to data corruption.', false, error);
     }
   }
 
   async softReset(): Promise<void> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot perform a soft reset while the vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot perform a soft reset while the vault is locked.', false);
     }
     const systemTables = this.schemaManager.systemTables;
     const tablesToClear = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
@@ -1838,7 +1794,7 @@ export class SystemPortabilityService {
   }
 
   async factoryReset(): Promise<void> {
-    console.warn('[Portability] INITIATING FACTORY RESET...');
+    console.warn('[Portability] Initiating factory reset...');
     this.securityService.lockVault();
 
     try {
@@ -1854,11 +1810,10 @@ export class SystemPortabilityService {
         req.onblocked = () => resolve();
       });
 
-      localStorage.clear();
-      sessionStorage.clear();
+      // Removed aggressive localStorage/sessionStorage clearing to protect unrelated apps
       window.location.reload();
     } catch (error) {
-      throw new FrameworkError('FACTORY_RESET_FAILED', 'Critical error during factory reset', false, error);
+      throw new FrameworkError('FACTORY_RESET_FAILED', 'Error during factory reset', false, error);
     }
   }
 }

@@ -17,7 +17,7 @@ export class SystemPortabilityService {
 
   async exportEcosystem(): Promise<string> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot export data while the vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot export data while the vault is locked.', false);
     }
 
     const exportData: Record<string, any[]> = {};
@@ -25,8 +25,6 @@ export class SystemPortabilityService {
     const systemTables = this.schemaManager.systemTables;
 
     for (const table of tables) {
-      // ARCHITECTURE FIX: Never export system tables (os_vault, os_ai_profiles)
-      // to ensure cross-device portability without compromising security.
       if (!systemTables.includes(table.name)) {
         exportData[table.name] = await table.toArray();
       }
@@ -37,7 +35,7 @@ export class SystemPortabilityService {
 
   async importEcosystem(jsonString: string): Promise<void> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot import data while the vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot import data while the vault is locked.', false);
     }
 
     try {
@@ -45,19 +43,17 @@ export class SystemPortabilityService {
       try {
         parsedWrap = JSON.parse(jsonString);
       } catch (e) {
-        throw new Error('Malformed JSON string.');
+        throw new FrameworkError('IMPORT_PARSE_ERROR', 'Malformed JSON string.', false);
       }
 
-      // Ensure it's our designated export format
       if (!parsedWrap.isArenaExport || !parsedWrap.data) {
-        throw new Error('Invalid or legacy export file.');
+        throw new FrameworkError('IMPORT_INVALID_FORMAT', 'Invalid or legacy export file.', false);
       }
 
       const parsedData: Record<string, any[]> = parsedWrap.data;
 
-      // SECURITY FIX: Deep DOS and Prototype Pollution check
       if (typeof parsedData !== 'object' || Array.isArray(parsedData)) {
-        throw new Error('Invalid export format structure.');
+        throw new FrameworkError('IMPORT_STRUCTURAL_ERROR', 'Invalid export format structure.', false);
       }
 
       const systemTables = this.schemaManager.systemTables;
@@ -68,9 +64,8 @@ export class SystemPortabilityService {
           const tableData = parsedData[table.name];
 
           if (tableData && Array.isArray(tableData)) {
-            // DOS Protection: Limit records per table
             if (tableData.length > 50000) {
-              throw new Error(`Payload too large for table ${table.name}.`);
+              throw new FrameworkError('IMPORT_DOS_RISK', `Payload too large for table ${table.name}.`, false);
             }
             await table.clear();
             await table.bulkPut(tableData);
@@ -80,14 +75,14 @@ export class SystemPortabilityService {
 
       console.log('[Portability] Ecosystem imported and restored successfully.');
     } catch (error) {
-      console.error('[Portability] Failed to import ecosystem:', error);
-      throw new FrameworkError('IMPORT_FAILED', 'Import failed. Invalid file format or data corruption detected.', false, error);
+      const isFrameworkError = error instanceof FrameworkError;
+      throw isFrameworkError ? error : new FrameworkError('IMPORT_FAILED', 'Import failed due to data corruption.', false, error);
     }
   }
 
   async softReset(): Promise<void> {
     if (!this.securityService.isVaultUnlocked()) {
-      throw new FrameworkError('VAULT_LOCKED', '[Portability] Cannot perform a soft reset while the vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot perform a soft reset while the vault is locked.', false);
     }
     const systemTables = this.schemaManager.systemTables;
     const tablesToClear = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
@@ -100,7 +95,7 @@ export class SystemPortabilityService {
   }
 
   async factoryReset(): Promise<void> {
-    console.warn('[Portability] INITIATING FACTORY RESET...');
+    console.warn('[Portability] Initiating factory reset...');
     this.securityService.lockVault();
 
     try {
@@ -116,11 +111,10 @@ export class SystemPortabilityService {
         req.onblocked = () => resolve();
       });
 
-      localStorage.clear();
-      sessionStorage.clear();
+      // Removed aggressive localStorage/sessionStorage clearing to protect unrelated apps
       window.location.reload();
     } catch (error) {
-      throw new FrameworkError('FACTORY_RESET_FAILED', 'Critical error during factory reset', false, error);
+      throw new FrameworkError('FACTORY_RESET_FAILED', 'Error during factory reset', false, error);
     }
   }
 }

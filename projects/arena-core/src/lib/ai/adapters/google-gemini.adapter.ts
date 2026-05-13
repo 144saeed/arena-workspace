@@ -35,14 +35,14 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) this.handleHttpError(res.status, null, '[Gemini Adapter] Failed to fetch models.');
+          if (!res.ok) this.handleHttpError(res.status, null, 'Failed to fetch models.');
           return res.json();
         })
     ).pipe(
-      map((data: any) => {
+      map((data: { models: { name: string, supportedGenerationMethods: string[] }[] }) => {
         return data.models
-          .filter((m: any) => m.supportedGenerationMethods.includes('generateContent'))
-          .map((m: any) => m.name.replace('models/', ''));
+          .filter(m => m.supportedGenerationMethods.includes('generateContent'))
+          .map(m => m.name.replace('models/', ''));
       })
     );
   }
@@ -62,11 +62,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         signal: abortSignal
       }).then(async res => {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) this.handleHttpError(res.status, data, '[Gemini Adapter] Unknown execution error.');
+        if (!res.ok) this.handleHttpError(res.status, data, 'Execution error.');
         return data;
       })
     ).pipe(
-      map((geminiResponse: any) => this.mapGeminiResponseToStandard(geminiResponse))
+      map((geminiResponse: Record<string, unknown>) => this.mapGeminiResponseToStandard(geminiResponse))
     );
   }
 
@@ -92,9 +92,9 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          this.handleHttpError(response.status, errData, '[Gemini Adapter] Streaming execution error.');
+          this.handleHttpError(response.status, errData, 'Streaming execution error.');
         }
-        if (!response.body) throw new Error('[Gemini Adapter] No response body for streaming.');
+        if (!response.body) throw new FrameworkError('STREAM_BODY_MISSING', 'No response body for streaming.', true);
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
@@ -120,7 +120,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
                 const parts = candidate.content?.parts || [];
                 let chunkText = '';
-                const toolCalls: any[] = [];
+                const toolCalls: Record<string, unknown>[] = [];
 
                 parts.forEach((part: any) => {
                   if (part.text) chunkText += part.text;
@@ -137,10 +137,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   subscriber.next({ type: 'chunk', content: chunkText });
                 }
                 if (toolCalls.length > 0) {
-                  subscriber.next({ type: 'tool-call', toolCalls });
+                  // Cast required to align loosely typed stream parsing with strict DTO
+                  subscriber.next({ type: 'tool-call', toolCalls: toolCalls as any });
                 }
               } catch (e) {
-                console.warn('[Gemini Adapter] Failed to parse stream chunk', e);
+                console.warn('[Gemini Adapter] Failed to parse stream chunk');
               }
             }
           }
@@ -151,7 +152,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         if (error.name !== 'AbortError') {
           subscriber.error(error);
         } else {
-          // Properly close the stream on abort to prevent Limbo state and memory leaks
           subscriber.complete();
         }
       });
@@ -169,8 +169,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     throw new FrameworkError(code, message, status >= 500);
   }
 
-  private mapRequestToGeminiFormat(request: AiRequestDto): any {
-    const payload: any = {
+  private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
       contents: [],
       generationConfig: { temperature: request.temperature ?? 0.7 }
     };
@@ -179,19 +179,19 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const conversationalMessages = request.messages.filter(m => m.role !== 'system');
 
     if (systemMessages.length > 0) {
-      payload.systemInstruction = {
+      payload['systemInstruction'] = {
         parts: systemMessages.flatMap(m =>
           m.parts.filter(p => p.type === 'text').map(p => ({ text: p.text }))
         )
       };
     }
 
-    payload.contents = conversationalMessages.map(msg => {
+    payload['contents'] = conversationalMessages.map(msg => {
       let role = 'user';
       if (msg.role === 'assistant') role = 'model';
       if (msg.role === 'tool') role = 'function';
 
-      const parts: any[] = [];
+      const parts: Record<string, unknown>[] = [];
 
       msg.parts.forEach(p => {
         if (p.type === 'text' && p.text) {
@@ -211,8 +211,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
           const match = p.imageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
           if (match) {
             parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-          } else {
-            console.warn('[Gemini Adapter] Invalid image URL format. Expected Base64 Data URI.');
           }
         }
       });
@@ -220,7 +218,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     });
 
     if (request.tools && request.tools.length > 0) {
-      payload.tools = [{
+      payload['tools'] = [{
         functionDeclarations: request.tools.map(t => ({
           name: t.name,
           description: t.description,
@@ -230,7 +228,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     }
 
     if (request.expectJson) {
-      payload.generationConfig.responseMimeType = 'application/json';
+      (payload['generationConfig'] as any).responseMimeType = 'application/json';
     }
 
     return payload;
@@ -241,7 +239,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const parts = candidate?.content?.parts || [];
 
     let content = '';
-    const toolCalls: any[] = [];
+    const toolCalls: Record<string, unknown>[] = [];
+
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
@@ -252,11 +251,13 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         });
       }
     });
+
     return {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+      // Cast required to align dynamic response parsing with strict DTO
+      toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
     };
   }
 }

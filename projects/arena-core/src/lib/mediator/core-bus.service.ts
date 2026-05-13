@@ -23,7 +23,7 @@ export class CoreBus {
     handlerType: Type<IMessageHandler<TMessage, TResult>>
   ): void {
     if (this.handlers.has(messageType)) {
-      throw new FrameworkError('REGISTRY_COLLISION', `Critical Error: Collision detected for ${messageType.name}`, false);
+      throw new FrameworkError('REGISTRY_COLLISION', `Collision detected for handler ${messageType.name}`, false);
     }
     this.handlers.set(messageType, handlerType);
   }
@@ -33,13 +33,11 @@ export class CoreBus {
     const HandlerType = this.handlers.get(messageType);
 
     if (!HandlerType) {
-      throw new Error(`[Core Bus] Critical Error: No handler registered for message type '${messageType.name}'.`);
+      throw new FrameworkError('HANDLER_NOT_FOUND', `No handler registered for message type '${messageType.name}'.`, false);
     }
 
     const handlerInstance = this.injector.get(HandlerType);
 
-    // ARCHITECTURE FIX: Pass the index functionally to prevent shared-state mutations 
-    // across concurrent asynchronous middleware executions.
     const executePipeline = async (idx: number): Promise<TResult> => {
       if (idx < this.middlewares.length) {
         const currentMiddleware = this.middlewares[idx];
