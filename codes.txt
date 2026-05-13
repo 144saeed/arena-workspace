@@ -242,14 +242,14 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return payload;
   }
 
-  private mapGeminiResponseToStandard(geminiResponse: any): AiResponseDto {
-    const candidate = geminiResponse.candidates?.[0];
+  private mapGeminiResponseToStandard(geminiResponse: Record<string, unknown>): AiResponseDto {
+    const candidate = (geminiResponse['candidates'] as any[])?.[0];
     const parts = candidate?.content?.parts || [];
 
     let content = '';
     const toolCalls: AiToolCallDto[] = [];
     
-    parts.forEach((part: any) => {
+    parts.forEach((part: GeminiPart) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
@@ -262,7 +262,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     
     return {
       content: content.trim(),
-      tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
+      tokensUsed: (geminiResponse['usageMetadata'] as any)?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined
     };
@@ -345,12 +345,14 @@ export class AgentExecutorService {
           const executionResults = await Promise.all(executionPromises);
 
           for (const { toolCall, result } of executionResults) {
-            const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
-
+            const resultPayload = result.status === 'success' 
+              ? result.data 
+              : { error: result.errorMessage };
+            
             toolResultsParts.push({
               type: 'tool-result',
               toolCallId: toolCall.id,
-              toolCallName: toolCall.name,
+              toolCallName: toolCall.name, 
               toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
             });
 
@@ -1077,7 +1079,6 @@ export class CoreDatabaseService extends Dexie {
     private readonly schemaManager: SchemaManagerService,
     @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
   ) {
-    // FIX: Pass the dynamically injected name directly to Dexie's constructor
     super(appName ? `${appName}_FrameworkDb` : 'ArenaCore_FallbackDb');
   }
 
@@ -1202,7 +1203,6 @@ import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.
 import { AiRegistryService } from '../ai/ai-registry.service';
 import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
 
-// FIX: Angular InjectionToken to provide the app name BEFORE singletons are instantiated.
 export const ARENA_APP_NAME = new InjectionToken<string>('ARENA_APP_NAME');
 
 @Injectable({

@@ -241,14 +241,14 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return payload;
   }
 
-  private mapGeminiResponseToStandard(geminiResponse: any): AiResponseDto {
-    const candidate = geminiResponse.candidates?.[0];
+  private mapGeminiResponseToStandard(geminiResponse: Record<string, unknown>): AiResponseDto {
+    const candidate = (geminiResponse['candidates'] as any[])?.[0];
     const parts = candidate?.content?.parts || [];
 
     let content = '';
     const toolCalls: AiToolCallDto[] = [];
     
-    parts.forEach((part: any) => {
+    parts.forEach((part: GeminiPart) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({
@@ -261,7 +261,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     
     return {
       content: content.trim(),
-      tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
+      tokensUsed: (geminiResponse['usageMetadata'] as any)?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined
     };

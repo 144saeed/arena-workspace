@@ -9,7 +9,6 @@ import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.
 import { AiRegistryService } from '../ai/ai-registry.service';
 import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
 
-// FIX: Angular InjectionToken to provide the app name BEFORE singletons are instantiated.
 export const ARENA_APP_NAME = new InjectionToken<string>('ARENA_APP_NAME');
 
 @Injectable({

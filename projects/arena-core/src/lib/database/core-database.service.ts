@@ -13,7 +13,6 @@ export class CoreDatabaseService extends Dexie {
     private readonly schemaManager: SchemaManagerService,
     @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
   ) {
-    // FIX: Pass the dynamically injected name directly to Dexie's constructor
     super(appName ? `${appName}_FrameworkDb` : 'ArenaCore_FallbackDb');
   }
 

@@ -73,12 +73,14 @@ export class AgentExecutorService {
           const executionResults = await Promise.all(executionPromises);
 
           for (const { toolCall, result } of executionResults) {
-            const resultPayload = result.status === 'success' ? result.data : { error: result.errorMessage, suggestion: 'Please fix parameters.' };
-
+            const resultPayload = result.status === 'success' 
+              ? result.data 
+              : { error: result.errorMessage };
+            
             toolResultsParts.push({
               type: 'tool-result',
               toolCallId: toolCall.id,
-              toolCallName: toolCall.name,
+              toolCallName: toolCall.name, 
               toolResult: typeof resultPayload === 'string' ? resultPayload : JSON.stringify(resultPayload)
             });
 
