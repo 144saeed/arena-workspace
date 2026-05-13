@@ -6,7 +6,7 @@ $outputPath = "C:\Users\Saeed\Documents\langapp\angular\new\arena-workspace\code
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # تعریف فرمت‌های مورد نظر
-$extensions = "*.ts", "*.html", "*.css", "*.scss", "*.js", "*.json", "*.md"
+$extensions = "*.ts", "*.html", "*.css", "*.scss", "*.js", "*.md"
 
 Write-Host "Searching for files..." -ForegroundColor Cyan
 
