@@ -138,11 +138,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   subscriber.next({ type: 'chunk', content: chunkText });
                 }
                 if (toolCalls.length > 0) {
-                  // Cast required to align loosely typed stream parsing with strict DTO
                   subscriber.next({ type: 'tool-call', toolCalls: toolCalls as any });
                 }
               } catch (e) {
-                console.warn('[Gemini Adapter] Failed to parse stream chunk');
+                // Ignore parse errors on incomplete chunks
               }
             }
           }
@@ -164,10 +163,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     });
   }
 
-  private handleHttpError(status: number, errorData: any, defaultMessage: string): never {
+  private createHttpError(status: number, errorData: any, defaultMessage: string): FrameworkError {
     const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
     const message = errorData?.error?.message || defaultMessage;
-    throw new FrameworkError(code, message, status >= 500);
+    return new FrameworkError(code, message, status >= 500);
   }
 
   private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
@@ -257,14 +256,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
-      // Cast required to align dynamic response parsing with strict DTO
       toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
     };
-  }
-  private createHttpError(status: number, errorData: any, defaultMessage: string): FrameworkError {
-    const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-    const message = errorData?.error?.message || defaultMessage;
-    return new FrameworkError(code, message, status >= 500);
   }
 }
 ------------------------------
@@ -433,7 +426,7 @@ export class AiToolRegistryService {
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\ai\ai-gateway.service.ts
 import { Injectable } from '@angular/core';
-import { Observable, from, switchMap, finalize, tap, catchError, throwError } from 'rxjs';
+import { Observable, from, switchMap, tap, catchError, throwError } from 'rxjs';
 import { AiRequestDto } from '../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../contracts/dtos/ai-response.dto';
 import { AiEventDto } from '../contracts/dtos/ai-event.dto';
@@ -470,23 +463,20 @@ export class AiGatewayService {
     );
   }
 
-  constantTimeCompare(a: string, b: string): boolean {
-    const encoder = new TextEncoder();
-    const arrA = encoder.encode(a);
-    const arrB = encoder.encode(b);
-
-    const maxLength = Math.max(arrA.length, arrB.length);
-
-    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
-    let mismatch = arrA.length ^ arrB.length;
-
-    for (let i = 0; i < maxLength; i++) {
-      const byteA = i < arrA.length ? arrA[i] : 0;
-      const byteB = i < arrB.length ? arrB[i] : 0;
-      mismatch |= byteA ^ byteB;
-    }
-
-    return mismatch === 0;
+  dispatchStream(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
+    return from(this.prepareSecureContext(targetProfileId)).pipe(
+      switchMap(({ adapter, decryptedKey, model, profileId }) => {
+        const finalRequest: AiRequestDto = { ...request, model: request.model || model };
+        return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
+          tap((event) => {
+            if (event.type === 'chunk' || event.type === 'complete') {
+              this.connectionMonitor.updateState(profileId, 'Connected');
+            }
+          }),
+          catchError((error) => this.handleConnectionError(error, profileId))
+        );
+      })
+    );
   }
 
   pingProfile(profileId: string): Observable<boolean> {
@@ -506,7 +496,7 @@ export class AiGatewayService {
       : await this.profileRepo.getActiveProfile();
 
     if (!profile) {
-      throw new FrameworkError('AI_PROFILE_NOT_FOUND', `Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`, false);
+      throw new FrameworkError('AI_PROFILE_NOT_FOUND', `Cannot dispatch request: No valid AI profile found.`, false);
     }
 
     const masterKey = this.securityService.getSessionKey();
@@ -517,7 +507,6 @@ export class AiGatewayService {
   }
 
   private handleConnectionError(error: any, profileId: string): Observable<never> {
-    // ARCHITECTURE FIX: Rely on strict HTTP status codes from the adapter instead of brittle string matching
     const isAuthError = error instanceof FrameworkError && error.code === 'AI_AUTH_FAILED';
     const state = isAuthError ? 'InvalidKey' : 'Disconnected';
 
@@ -1509,18 +1498,12 @@ export class CryptoService {
     return this.bufferToHex(salt.buffer);
   }
 
-  /**
-   * Performs a cryptographically secure, constant-time byte comparison.
-   * Completely immune to JS Unicode and JIT optimization timing leaks.
-   */
   constantTimeCompare(a: string, b: string): boolean {
     const encoder = new TextEncoder();
     const arrA = encoder.encode(a);
     const arrB = encoder.encode(b);
 
     const maxLength = Math.max(arrA.length, arrB.length);
-
-    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
     let mismatch = arrA.length ^ arrB.length;
 
     for (let i = 0; i < maxLength; i++) {
@@ -1601,8 +1584,6 @@ export class SecurityService {
   public readonly isVaultUnlocked = this._isVaultUnlocked.asReadonly();
 
   private sessionMasterKey: CryptoKey | null = null;
-
-  // SECURITY FIX: Prevent Race Condition on rapid double-clicks
   private isUnlocking = false;
 
   constructor(
@@ -1617,12 +1598,11 @@ export class SecurityService {
     } catch (e) {
       throw new FrameworkError('NOT_BOOTED', 'Cannot access vault. Ensure CoreEngine is booted first.', false);
     }
-    if (vault) throw new FrameworkError('VAULT_EXISTS', '[Security] Vault is already initialized.', false);
+    if (vault) throw new FrameworkError('VAULT_EXISTS', 'Vault is already initialized.', false);
 
-    // SECURITY FIX: Require at least 8 characters, combining letters and numbers
     const complexRegex = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
     if (!password || !complexRegex.test(password)) {
-      throw new FrameworkError('WEAK_PASSWORD', `Master password must be at least 8 characters long and contain both letters and numbers.`, false);
+      throw new FrameworkError('WEAK_PASSWORD', 'Master password must be at least 8 characters long and contain both letters and numbers.', false);
     }
 
     const salt = this.cryptoService.generateSalt();
@@ -1633,14 +1613,10 @@ export class SecurityService {
     });
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
     this._isVaultUnlocked.set(true);
-
-    console.log('[Security] Vault securely initialized and unlocked.');
   }
 
   async unlockVault(password: string): Promise<boolean> {
-    // SECURITY FIX: Lock the method while processing to prevent database race conditions
     if (this.isUnlocking) {
-      console.warn('[Security] Unlock in progress, ignoring duplicate request.');
       return false;
     }
 
@@ -1648,22 +1624,19 @@ export class SecurityService {
 
     try {
       const vault = await this.vaultRepo.getMasterVault();
-      if (!vault) throw new FrameworkError('VAULT_MISSING', '[Security] No vault found. Setup required.', false);
+      if (!vault) throw new FrameworkError('VAULT_MISSING', 'No vault found. Setup required.', false);
 
       const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
 
       if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
-        // SECURITY FIX: Persisted anti-brute-force mechanism
         const currentAttempts = (vault.failedAttempts || 0) + 1;
         await this.vaultRepo.update(1, { failedAttempts: currentAttempts, lastFailedAttempt: Date.now() });
 
-        const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000); // Max 5 seconds delay
-        console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
+        const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000);
         await new Promise(r => setTimeout(r, delayMs));
         return false;
       }
 
-      // Reset counter on success
       if (vault.failedAttempts && vault.failedAttempts > 0) {
         await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
       }
@@ -1671,11 +1644,9 @@ export class SecurityService {
       this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
       this._isVaultUnlocked.set(true);
 
-      console.log('[Security] Vault unlocked successfully.');
       return true;
 
     } finally {
-      // Always release the lock, even if an error occurs
       this.isUnlocking = false;
     }
   }
@@ -1683,12 +1654,11 @@ export class SecurityService {
   lockVault(): void {
     this.sessionMasterKey = null;
     this._isVaultUnlocked.set(false);
-    console.log('[Security] Vault locked and RAM purged.');
   }
 
   getSessionKey(): CryptoKey {
     if (!this.isVaultUnlocked() || !this.sessionMasterKey) {
-      throw new FrameworkError('VAULT_LOCKED', '[Security] Cannot access session key: Vault is locked.', false);
+      throw new FrameworkError('VAULT_LOCKED', 'Cannot access session key: Vault is locked.', false);
     }
     return this.sessionMasterKey;
   }

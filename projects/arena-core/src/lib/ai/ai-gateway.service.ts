@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { Observable, from, switchMap, finalize, tap, catchError, throwError } from 'rxjs';
+import { Observable, from, switchMap, tap, catchError, throwError } from 'rxjs';
 import { AiRequestDto } from '../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../contracts/dtos/ai-response.dto';
 import { AiEventDto } from '../contracts/dtos/ai-event.dto';
@@ -36,23 +36,20 @@ export class AiGatewayService {
     );
   }
 
-  constantTimeCompare(a: string, b: string): boolean {
-    const encoder = new TextEncoder();
-    const arrA = encoder.encode(a);
-    const arrB = encoder.encode(b);
-
-    const maxLength = Math.max(arrA.length, arrB.length);
-
-    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
-    let mismatch = arrA.length ^ arrB.length;
-
-    for (let i = 0; i < maxLength; i++) {
-      const byteA = i < arrA.length ? arrA[i] : 0;
-      const byteB = i < arrB.length ? arrB[i] : 0;
-      mismatch |= byteA ^ byteB;
-    }
-
-    return mismatch === 0;
+  dispatchStream(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
+    return from(this.prepareSecureContext(targetProfileId)).pipe(
+      switchMap(({ adapter, decryptedKey, model, profileId }) => {
+        const finalRequest: AiRequestDto = { ...request, model: request.model || model };
+        return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
+          tap((event) => {
+            if (event.type === 'chunk' || event.type === 'complete') {
+              this.connectionMonitor.updateState(profileId, 'Connected');
+            }
+          }),
+          catchError((error) => this.handleConnectionError(error, profileId))
+        );
+      })
+    );
   }
 
   pingProfile(profileId: string): Observable<boolean> {
@@ -72,7 +69,7 @@ export class AiGatewayService {
       : await this.profileRepo.getActiveProfile();
 
     if (!profile) {
-      throw new FrameworkError('AI_PROFILE_NOT_FOUND', `Cannot dispatch request: No valid AI profile found${targetProfileId ? ' for ID: ' + targetProfileId : '.'}`, false);
+      throw new FrameworkError('AI_PROFILE_NOT_FOUND', `Cannot dispatch request: No valid AI profile found.`, false);
     }
 
     const masterKey = this.securityService.getSessionKey();
@@ -83,7 +80,6 @@ export class AiGatewayService {
   }
 
   private handleConnectionError(error: any, profileId: string): Observable<never> {
-    // ARCHITECTURE FIX: Rely on strict HTTP status codes from the adapter instead of brittle string matching
     const isAuthError = error instanceof FrameworkError && error.code === 'AI_AUTH_FAILED';
     const state = isAuthError ? 'InvalidKey' : 'Disconnected';
 

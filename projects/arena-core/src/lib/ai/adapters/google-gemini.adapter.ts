@@ -137,11 +137,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   subscriber.next({ type: 'chunk', content: chunkText });
                 }
                 if (toolCalls.length > 0) {
-                  // Cast required to align loosely typed stream parsing with strict DTO
                   subscriber.next({ type: 'tool-call', toolCalls: toolCalls as any });
                 }
               } catch (e) {
-                console.warn('[Gemini Adapter] Failed to parse stream chunk');
+                // Ignore parse errors on incomplete chunks
               }
             }
           }
@@ -163,10 +162,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     });
   }
 
-  private handleHttpError(status: number, errorData: any, defaultMessage: string): never {
+  private createHttpError(status: number, errorData: any, defaultMessage: string): FrameworkError {
     const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
     const message = errorData?.error?.message || defaultMessage;
-    throw new FrameworkError(code, message, status >= 500);
+    return new FrameworkError(code, message, status >= 500);
   }
 
   private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
@@ -256,13 +255,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
-      // Cast required to align dynamic response parsing with strict DTO
       toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
     };
-  }
-  private createHttpError(status: number, errorData: any, defaultMessage: string): FrameworkError {
-    const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-    const message = errorData?.error?.message || defaultMessage;
-    return new FrameworkError(code, message, status >= 500);
   }
 }
