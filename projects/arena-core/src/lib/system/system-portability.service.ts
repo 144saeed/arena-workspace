@@ -47,22 +47,22 @@ export class SystemPortabilityService {
       }
 
       if (!parsedWrap.isArenaExport || !parsedWrap.data) {
-        throw new FrameworkError('IMPORT_INVALID_FORMAT', 'Invalid or legacy export file.', false);
+         throw new FrameworkError('IMPORT_INVALID_FORMAT', 'Invalid or legacy export file.', false);
       }
 
       const parsedData: Record<string, any[]> = parsedWrap.data;
 
       if (typeof parsedData !== 'object' || Array.isArray(parsedData)) {
-        throw new FrameworkError('IMPORT_STRUCTURAL_ERROR', 'Invalid export format structure.', false);
+          throw new FrameworkError('IMPORT_STRUCTURAL_ERROR', 'Invalid export format structure.', false);
       }
-
+      
       const systemTables = this.schemaManager.systemTables;
       const safeTablesToImport = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
 
       await this.dbEngine.transaction('rw', safeTablesToImport, async () => {
         for (const table of safeTablesToImport) {
           const tableData = parsedData[table.name];
-
+          
           if (tableData && Array.isArray(tableData)) {
             if (tableData.length > 50000) {
               throw new FrameworkError('IMPORT_DOS_RISK', `Payload too large for table ${table.name}.`, false);
@@ -105,7 +105,6 @@ export class SystemPortabilityService {
       await this.dbEngine.delete();
 
       await new Promise<void>((resolve, reject) => {
-        // FIX: Dynamically delete the correct meta database
         const req = indexedDB.deleteDatabase(this.schemaManager.metaDbName);
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);

@@ -15,6 +15,11 @@ interface GeminiPart {
   functionCall?: { name: string; args: Record<string, unknown> };
 }
 
+interface GeminiResponse {
+  candidates?: { content?: { parts?: GeminiPart[] } }[];
+  usageMetadata?: { totalTokenCount?: number };
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -73,7 +78,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         return data;
       })
     ).pipe(
-      map((geminiResponse: Record<string, unknown>) => this.mapGeminiResponseToStandard(geminiResponse))
+      map((geminiResponse: GeminiResponse) => this.mapGeminiResponseToStandard(geminiResponse))
     );
   }
 
@@ -121,7 +126,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
               if (!dataStr) continue;
 
               try {
-                const parsed = JSON.parse(dataStr);
+                const parsed = JSON.parse(dataStr) as GeminiResponse;
                 const candidate = parsed.candidates?.[0];
                 if (!candidate) continue;
 
@@ -242,8 +247,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return payload;
   }
 
-  private mapGeminiResponseToStandard(geminiResponse: Record<string, unknown>): AiResponseDto {
-    const candidate = (geminiResponse['candidates'] as any[])?.[0];
+  private mapGeminiResponseToStandard(geminiResponse: GeminiResponse): AiResponseDto {
+    const candidate = geminiResponse.candidates?.[0];
     const parts = candidate?.content?.parts || [];
 
     let content = '';
@@ -262,7 +267,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     
     return {
       content: content.trim(),
-      tokensUsed: (geminiResponse['usageMetadata'] as any)?.totalTokenCount || 0,
+      tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined
     };
@@ -1723,22 +1728,22 @@ export class SystemPortabilityService {
       }
 
       if (!parsedWrap.isArenaExport || !parsedWrap.data) {
-        throw new FrameworkError('IMPORT_INVALID_FORMAT', 'Invalid or legacy export file.', false);
+         throw new FrameworkError('IMPORT_INVALID_FORMAT', 'Invalid or legacy export file.', false);
       }
 
       const parsedData: Record<string, any[]> = parsedWrap.data;
 
       if (typeof parsedData !== 'object' || Array.isArray(parsedData)) {
-        throw new FrameworkError('IMPORT_STRUCTURAL_ERROR', 'Invalid export format structure.', false);
+          throw new FrameworkError('IMPORT_STRUCTURAL_ERROR', 'Invalid export format structure.', false);
       }
-
+      
       const systemTables = this.schemaManager.systemTables;
       const safeTablesToImport = this.dbEngine.tables.filter(t => !systemTables.includes(t.name));
 
       await this.dbEngine.transaction('rw', safeTablesToImport, async () => {
         for (const table of safeTablesToImport) {
           const tableData = parsedData[table.name];
-
+          
           if (tableData && Array.isArray(tableData)) {
             if (tableData.length > 50000) {
               throw new FrameworkError('IMPORT_DOS_RISK', `Payload too large for table ${table.name}.`, false);
@@ -1781,7 +1786,6 @@ export class SystemPortabilityService {
       await this.dbEngine.delete();
 
       await new Promise<void>((resolve, reject) => {
-        // FIX: Dynamically delete the correct meta database
         const req = indexedDB.deleteDatabase(this.schemaManager.metaDbName);
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);

@@ -14,6 +14,11 @@ interface GeminiPart {
   functionCall?: { name: string; args: Record<string, unknown> };
 }
 
+interface GeminiResponse {
+  candidates?: { content?: { parts?: GeminiPart[] } }[];
+  usageMetadata?: { totalTokenCount?: number };
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -72,7 +77,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         return data;
       })
     ).pipe(
-      map((geminiResponse: Record<string, unknown>) => this.mapGeminiResponseToStandard(geminiResponse))
+      map((geminiResponse: GeminiResponse) => this.mapGeminiResponseToStandard(geminiResponse))
     );
   }
 
@@ -120,7 +125,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
               if (!dataStr) continue;
 
               try {
-                const parsed = JSON.parse(dataStr);
+                const parsed = JSON.parse(dataStr) as GeminiResponse;
                 const candidate = parsed.candidates?.[0];
                 if (!candidate) continue;
 
@@ -241,8 +246,8 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return payload;
   }
 
-  private mapGeminiResponseToStandard(geminiResponse: Record<string, unknown>): AiResponseDto {
-    const candidate = (geminiResponse['candidates'] as any[])?.[0];
+  private mapGeminiResponseToStandard(geminiResponse: GeminiResponse): AiResponseDto {
+    const candidate = geminiResponse.candidates?.[0];
     const parts = candidate?.content?.parts || [];
 
     let content = '';
@@ -261,7 +266,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     
     return {
       content: content.trim(),
-      tokensUsed: (geminiResponse['usageMetadata'] as any)?.totalTokenCount || 0,
+      tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined
     };
