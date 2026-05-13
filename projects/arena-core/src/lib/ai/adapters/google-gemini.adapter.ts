@@ -35,10 +35,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) {
-            const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-            throw new FrameworkError(code, '[Gemini Adapter] Failed to fetch models.', res.status >= 500);
-          }
+          if (!res.ok) this.handleHttpError(res.status, null, '[Gemini Adapter] Failed to fetch models.');
           return res.json();
         })
     ).pipe(
@@ -65,11 +62,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         signal: abortSignal
       }).then(async res => {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          // ARCHITECTURE FIX: Use exact HTTP status for precision error tracking
-          const code = res.status === 401 || res.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-          throw new FrameworkError(code, data.error?.message || '[Gemini Adapter] Unknown execution error.', res.status >= 500);
-        }
+        if (!res.ok) this.handleHttpError(res.status, data, '[Gemini Adapter] Unknown execution error.');
         return data;
       })
     ).pipe(
@@ -83,7 +76,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       const payload = this.mapRequestToGeminiFormat(request);
       const abortController = new AbortController();
 
-      // ARCHITECTURE FIX: Ensure listener is properly referenced for teardown
       const onAbort = () => abortController.abort();
       if (abortSignal) {
         abortSignal.addEventListener('abort', onAbort);
@@ -100,8 +92,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          const code = response.status === 401 || response.status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
-          throw new FrameworkError(code, errData.error?.message || '[Gemini Adapter] Streaming execution error.', response.status >= 500);
+          this.handleHttpError(response.status, errData, '[Gemini Adapter] Streaming execution error.');
         }
         if (!response.body) throw new Error('[Gemini Adapter] No response body for streaming.');
 
@@ -159,15 +150,23 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).catch(error => {
         if (error.name !== 'AbortError') {
           subscriber.error(error);
+        } else {
+          // Properly close the stream on abort to prevent Limbo state and memory leaks
+          subscriber.complete();
         }
       });
 
-      // ARCHITECTURE FIX: RxJS teardown hook ensures 100% memory leak prevention
       return () => {
         abortController.abort();
         if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
       };
     });
+  }
+
+  private handleHttpError(status: number, errorData: any, defaultMessage: string): never {
+    const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+    const message = errorData?.error?.message || defaultMessage;
+    throw new FrameworkError(code, message, status >= 500);
   }
 
   private mapRequestToGeminiFormat(request: AiRequestDto): any {
