@@ -9,13 +9,17 @@ import { CoreDatabaseService } from './core-database.service';
  */
 export abstract class BaseRepository<T, TKey> {
 
-    protected readonly table: Table<T, TKey>;
+    // 🚀 THE FIX: Use a getter to dynamically fetch the table ONLY when needed.
+    // This prevents Dexie from throwing 'InvalidTableError' during Angular's DI phase.
+    protected get table(): Table<T, TKey> {
+        return this.dbEngine.getTable<T, TKey>(this.tableName);
+    }
 
     constructor(
         protected readonly dbEngine: CoreDatabaseService,
         protected readonly tableName: string
     ) {
-        this.table = this.dbEngine.getTable<T, TKey>(this.tableName);
+        // ❌ REMOVED: this.table = this.dbEngine.getTable<T, TKey>(this.tableName);
     }
 
     async getAll(): Promise<T[]> {
