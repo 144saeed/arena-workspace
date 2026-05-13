@@ -24,9 +24,9 @@ export class CryptoService {
     const arrB = encoder.encode(b);
 
     const maxLength = Math.max(arrA.length, arrB.length);
-    let mismatch = 0;
 
-    if (arrA.length !== arrB.length) mismatch = 1;
+    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
+    let mismatch = arrA.length ^ arrB.length;
 
     for (let i = 0; i < maxLength; i++) {
       const byteA = i < arrA.length ? arrA[i] : 0;

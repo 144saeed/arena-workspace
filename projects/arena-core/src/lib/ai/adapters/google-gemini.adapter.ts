@@ -35,7 +35,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) this.handleHttpError(res.status, null, 'Failed to fetch models.');
+          if (!res.ok) throw this.createHttpError(res.status, null, 'Failed to fetch models.');
           return res.json();
         })
     ).pipe(
@@ -62,7 +62,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         signal: abortSignal
       }).then(async res => {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) this.handleHttpError(res.status, data, 'Execution error.');
+        if (!res.ok) throw this.createHttpError(res.status, data, 'Execution error.');
         return data;
       })
     ).pipe(
@@ -92,7 +92,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          this.handleHttpError(response.status, errData, 'Streaming execution error.');
+          throw this.createHttpError(response.status, errData, 'Streaming execution error.');
         }
         if (!response.body) throw new FrameworkError('STREAM_BODY_MISSING', 'No response body for streaming.', true);
 
@@ -259,5 +259,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       // Cast required to align dynamic response parsing with strict DTO
       toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
     };
+  }
+  private createHttpError(status: number, errorData: any, defaultMessage: string): FrameworkError {
+    const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+    const message = errorData?.error?.message || defaultMessage;
+    return new FrameworkError(code, message, status >= 500);
   }
 }

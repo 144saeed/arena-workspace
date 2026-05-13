@@ -36,7 +36,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     return from(
       fetch(this.BASE_URL, { method: 'GET', headers: { 'x-goog-api-key': apiKey } })
         .then(res => {
-          if (!res.ok) this.handleHttpError(res.status, null, 'Failed to fetch models.');
+          if (!res.ok) throw this.createHttpError(res.status, null, 'Failed to fetch models.');
           return res.json();
         })
     ).pipe(
@@ -63,7 +63,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         signal: abortSignal
       }).then(async res => {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) this.handleHttpError(res.status, data, 'Execution error.');
+        if (!res.ok) throw this.createHttpError(res.status, data, 'Execution error.');
         return data;
       })
     ).pipe(
@@ -93,7 +93,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }).then(async response => {
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
-          this.handleHttpError(response.status, errData, 'Streaming execution error.');
+          throw this.createHttpError(response.status, errData, 'Streaming execution error.');
         }
         if (!response.body) throw new FrameworkError('STREAM_BODY_MISSING', 'No response body for streaming.', true);
 
@@ -261,6 +261,11 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
     };
   }
+  private createHttpError(status: number, errorData: any, defaultMessage: string): FrameworkError {
+    const code = status === 401 || status === 403 ? 'AI_AUTH_FAILED' : 'AI_NETWORK_ERROR';
+    const message = errorData?.error?.message || defaultMessage;
+    return new FrameworkError(code, message, status >= 500);
+  }
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\ai\agent\agent-executor.service.ts
@@ -385,11 +390,6 @@ import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 export type ToolHandler = (args: Record<string, any>, context: IToolExecutionContext) => Promise<StructuredToolResultDto>;
 
-/**
- * The Central Registry for App-Specific AI Tools.
- * Now injects execution contexts into handlers to prevent JavaScript 'this' binding 
- * traps and provides native Angular DI capabilities to local tools.
- */
 @Injectable({
   providedIn: 'root'
 })
@@ -401,8 +401,6 @@ export class AiToolRegistryService {
 
   registerTool(definition: AiToolDto, handler: ToolHandler): void {
     if (this.tools.has(definition.name)) {
-      // SECURITY/ARCHITECTURE FIX: Throw a hard error instead of a silent warning 
-      // to prevent unpredictable agent behavior from tool name collisions.
       throw new FrameworkError(
         'TOOL_NAME_COLLISION',
         `Critical Error: A tool with the name '${definition.name}' is already registered. Tool names must be globally unique across all plugins.`,
@@ -420,24 +418,15 @@ export class AiToolRegistryService {
   async executeTool(name: string, args: Record<string, any>, abortSignal?: AbortSignal): Promise<StructuredToolResultDto> {
     const tool = this.tools.get(name);
     if (!tool) {
-      return {
-        status: 'fatal_error',
-        errorMessage: `[Tool Registry] Critical Error: Tool '${name}' is not registered.`
-      };
+      return { status: 'fatal_error', errorMessage: `Critical Error: Tool '${name}' is not registered.` };
     }
 
     try {
-      const context: IToolExecutionContext = {
-        injector: this.injector,
-        abortSignal
-      };
+      const context: IToolExecutionContext = { injector: this.injector, abortSignal };
       return await tool.handler(args, context);
     } catch (error) {
       console.error(`[Tool Registry] Tool '${name}' threw an unhandled exception.`);
-      return {
-        status: 'fatal_error',
-        errorMessage: 'An internal error occurred while executing this tool.' // Prevent leaking stack traces to the AI
-      };
+      return { status: 'fatal_error', errorMessage: 'An internal error occurred while executing this tool.' };
     }
   }
 }
@@ -481,22 +470,23 @@ export class AiGatewayService {
     );
   }
 
-  dispatchStream(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
-    return from(this.prepareSecureContext(targetProfileId)).pipe(
-      switchMap(({ adapter, decryptedKey, model, profileId }) => {
-        const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
-          tap({
-            next: (event) => {
-              if (event.type === 'chunk' || event.type === 'complete') {
-                this.connectionMonitor.updateState(profileId, 'Connected');
-              }
-            },
-            error: (error) => this.handleConnectionError(error, profileId)
-          })
-        );
-      })
-    );
+  constantTimeCompare(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const arrA = encoder.encode(a);
+    const arrB = encoder.encode(b);
+
+    const maxLength = Math.max(arrA.length, arrB.length);
+
+    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
+    let mismatch = arrA.length ^ arrB.length;
+
+    for (let i = 0; i < maxLength; i++) {
+      const byteA = i < arrA.length ? arrA[i] : 0;
+      const byteB = i < arrB.length ? arrB[i] : 0;
+      mismatch |= byteA ^ byteB;
+    }
+
+    return mismatch === 0;
   }
 
   pingProfile(profileId: string): Observable<boolean> {
@@ -624,30 +614,16 @@ import { AiToolCallDto } from './ai-tool-call.dto';
 
 export type AiMessagePartType = 'text' | 'image' | 'tool-call' | 'tool-result';
 
-/**
- * Represents a single multimodal fragment of an AI message.
- * Completely future-proofs the architecture against new media types (e.g., audio, video).
- */
 export interface AiMessagePartDto {
     readonly type: AiMessagePartType;
-
-    /** * Present if type is 'text' */
     readonly text?: string;
-
-    /** * Present if type is 'image'. Expected as a Base64 Data URI or external URL */
     readonly imageUrl?: string;
-
-    /** * Present if type is 'tool-call'. Contains the AI's request to execute a function */
     readonly toolCall?: AiToolCallDto;
-
-    /** * Present if type is 'tool-result'. Maps back to the toolCall ID (UUID) for internal tracking */
     readonly toolCallId?: string;
 
-    /** * ARCHITECTURE FIX: Present if type is 'tool-result'. The actual name of the function executed.
-     * Crucial for AI Providers like Gemini that strictly require the function name in the response. */
+    /** * The actual name of the function executed. Crucial for strict AI schemas. */
     readonly toolCallName?: string;
 
-    /** * Present if type is 'tool-result'. The stringified outcome of the execution */
     readonly toolResult?: string;
 }
 ------------------------------
@@ -1543,9 +1519,9 @@ export class CryptoService {
     const arrB = encoder.encode(b);
 
     const maxLength = Math.max(arrA.length, arrB.length);
-    let mismatch = 0;
 
-    if (arrA.length !== arrB.length) mismatch = 1;
+    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
+    let mismatch = arrA.length ^ arrB.length;
 
     for (let i = 0; i < maxLength; i++) {
       const byteA = i < arrA.length ? arrA[i] : 0;
@@ -1626,13 +1602,21 @@ export class SecurityService {
 
   private sessionMasterKey: CryptoKey | null = null;
 
+  // SECURITY FIX: Prevent Race Condition on rapid double-clicks
+  private isUnlocking = false;
+
   constructor(
     private readonly cryptoService: CryptoService,
     private readonly vaultRepo: VaultRepository
   ) { }
 
   async setupVault(password: string): Promise<void> {
-    const vault = await this.vaultRepo.getMasterVault();
+    let vault;
+    try {
+      vault = await this.vaultRepo.getMasterVault();
+    } catch (e) {
+      throw new FrameworkError('NOT_BOOTED', 'Cannot access vault. Ensure CoreEngine is booted first.', false);
+    }
     if (vault) throw new FrameworkError('VAULT_EXISTS', '[Security] Vault is already initialized.', false);
 
     // SECURITY FIX: Require at least 8 characters, combining letters and numbers
@@ -1654,32 +1638,46 @@ export class SecurityService {
   }
 
   async unlockVault(password: string): Promise<boolean> {
-    const vault = await this.vaultRepo.getMasterVault();
-    if (!vault) throw new FrameworkError('VAULT_MISSING', '[Security] No vault found. Setup required.', false);
-
-    const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
-
-    if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
-      // SECURITY FIX: Persisted anti-brute-force mechanism
-      const currentAttempts = (vault.failedAttempts || 0) + 1;
-      await this.vaultRepo.update(1, { failedAttempts: currentAttempts, lastFailedAttempt: Date.now() });
-
-      const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000); // Max 5 seconds delay
-      console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
-      await new Promise(r => setTimeout(r, delayMs));
+    // SECURITY FIX: Lock the method while processing to prevent database race conditions
+    if (this.isUnlocking) {
+      console.warn('[Security] Unlock in progress, ignoring duplicate request.');
       return false;
     }
 
-    // Reset counter on success
-    if (vault.failedAttempts && vault.failedAttempts > 0) {
-      await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
+    this.isUnlocking = true;
+
+    try {
+      const vault = await this.vaultRepo.getMasterVault();
+      if (!vault) throw new FrameworkError('VAULT_MISSING', '[Security] No vault found. Setup required.', false);
+
+      const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
+
+      if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
+        // SECURITY FIX: Persisted anti-brute-force mechanism
+        const currentAttempts = (vault.failedAttempts || 0) + 1;
+        await this.vaultRepo.update(1, { failedAttempts: currentAttempts, lastFailedAttempt: Date.now() });
+
+        const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000); // Max 5 seconds delay
+        console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
+        await new Promise(r => setTimeout(r, delayMs));
+        return false;
+      }
+
+      // Reset counter on success
+      if (vault.failedAttempts && vault.failedAttempts > 0) {
+        await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
+      }
+
+      this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
+      this._isVaultUnlocked.set(true);
+
+      console.log('[Security] Vault unlocked successfully.');
+      return true;
+
+    } finally {
+      // Always release the lock, even if an error occurs
+      this.isUnlocking = false;
     }
-
-    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
-    this._isVaultUnlocked.set(true);
-
-    console.log('[Security] Vault unlocked successfully.');
-    return true;
   }
 
   lockVault(): void {

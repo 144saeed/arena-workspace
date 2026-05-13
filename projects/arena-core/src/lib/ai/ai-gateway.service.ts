@@ -36,22 +36,23 @@ export class AiGatewayService {
     );
   }
 
-  dispatchStream(request: AiRequestDto, targetProfileId?: string, abortSignal?: AbortSignal): Observable<AiEventDto> {
-    return from(this.prepareSecureContext(targetProfileId)).pipe(
-      switchMap(({ adapter, decryptedKey, model, profileId }) => {
-        const finalRequest: AiRequestDto = { ...request, model: request.model || model };
-        return adapter.generateStream(finalRequest, decryptedKey, abortSignal).pipe(
-          tap({
-            next: (event) => {
-              if (event.type === 'chunk' || event.type === 'complete') {
-                this.connectionMonitor.updateState(profileId, 'Connected');
-              }
-            },
-            error: (error) => this.handleConnectionError(error, profileId)
-          })
-        );
-      })
-    );
+  constantTimeCompare(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const arrA = encoder.encode(a);
+    const arrB = encoder.encode(b);
+
+    const maxLength = Math.max(arrA.length, arrB.length);
+
+    // FIX: Bitwise XOR of lengths prevents early-exit timing leaks completely.
+    let mismatch = arrA.length ^ arrB.length;
+
+    for (let i = 0; i < maxLength; i++) {
+      const byteA = i < arrA.length ? arrA[i] : 0;
+      const byteB = i < arrB.length ? arrB[i] : 0;
+      mismatch |= byteA ^ byteB;
+    }
+
+    return mismatch === 0;
   }
 
   pingProfile(profileId: string): Observable<boolean> {

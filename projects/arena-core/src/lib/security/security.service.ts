@@ -13,13 +13,21 @@ export class SecurityService {
 
   private sessionMasterKey: CryptoKey | null = null;
 
+  // SECURITY FIX: Prevent Race Condition on rapid double-clicks
+  private isUnlocking = false;
+
   constructor(
     private readonly cryptoService: CryptoService,
     private readonly vaultRepo: VaultRepository
   ) { }
 
   async setupVault(password: string): Promise<void> {
-    const vault = await this.vaultRepo.getMasterVault();
+    let vault;
+    try {
+      vault = await this.vaultRepo.getMasterVault();
+    } catch (e) {
+      throw new FrameworkError('NOT_BOOTED', 'Cannot access vault. Ensure CoreEngine is booted first.', false);
+    }
     if (vault) throw new FrameworkError('VAULT_EXISTS', '[Security] Vault is already initialized.', false);
 
     // SECURITY FIX: Require at least 8 characters, combining letters and numbers
@@ -41,32 +49,46 @@ export class SecurityService {
   }
 
   async unlockVault(password: string): Promise<boolean> {
-    const vault = await this.vaultRepo.getMasterVault();
-    if (!vault) throw new FrameworkError('VAULT_MISSING', '[Security] No vault found. Setup required.', false);
-
-    const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
-
-    if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
-      // SECURITY FIX: Persisted anti-brute-force mechanism
-      const currentAttempts = (vault.failedAttempts || 0) + 1;
-      await this.vaultRepo.update(1, { failedAttempts: currentAttempts, lastFailedAttempt: Date.now() });
-
-      const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000); // Max 5 seconds delay
-      console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
-      await new Promise(r => setTimeout(r, delayMs));
+    // SECURITY FIX: Lock the method while processing to prevent database race conditions
+    if (this.isUnlocking) {
+      console.warn('[Security] Unlock in progress, ignoring duplicate request.');
       return false;
     }
 
-    // Reset counter on success
-    if (vault.failedAttempts && vault.failedAttempts > 0) {
-      await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
+    this.isUnlocking = true;
+
+    try {
+      const vault = await this.vaultRepo.getMasterVault();
+      if (!vault) throw new FrameworkError('VAULT_MISSING', '[Security] No vault found. Setup required.', false);
+
+      const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
+
+      if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
+        // SECURITY FIX: Persisted anti-brute-force mechanism
+        const currentAttempts = (vault.failedAttempts || 0) + 1;
+        await this.vaultRepo.update(1, { failedAttempts: currentAttempts, lastFailedAttempt: Date.now() });
+
+        const delayMs = Math.min(Math.pow(2, currentAttempts) * 100, 5000); // Max 5 seconds delay
+        console.warn(`[Security] Invalid master password attempt. Throttling for ${delayMs}ms.`);
+        await new Promise(r => setTimeout(r, delayMs));
+        return false;
+      }
+
+      // Reset counter on success
+      if (vault.failedAttempts && vault.failedAttempts > 0) {
+        await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
+      }
+
+      this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
+      this._isVaultUnlocked.set(true);
+
+      console.log('[Security] Vault unlocked successfully.');
+      return true;
+
+    } finally {
+      // Always release the lock, even if an error occurs
+      this.isUnlocking = false;
     }
-
-    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
-    this._isVaultUnlocked.set(true);
-
-    console.log('[Security] Vault unlocked successfully.');
-    return true;
   }
 
   lockVault(): void {
