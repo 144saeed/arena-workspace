@@ -1,26 +1,22 @@
-import { Injectable } from '@angular/core';
+import { Injectable, Inject, Optional } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
 import { SchemaManagerService } from './schema-manager.service';
+import { ARENA_APP_NAME } from '../engine/core-engine.service';
 
-/**
- * The Central Database Engine of the Framework.
- * Configures tables dynamically based on registered applications.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CoreDatabaseService extends Dexie {
 
-  constructor(private readonly schemaManager: SchemaManagerService) {
-    super('ArenaFrameworkDb');
+  constructor(
+    private readonly schemaManager: SchemaManagerService,
+    @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
+  ) {
+    // FIX: Pass the dynamically injected name directly to Dexie's constructor
+    super(appName ? `${appName}_FrameworkDb` : 'ArenaCore_FallbackDb');
   }
 
-  /**
-   * Initializes the database with schemas. Must be called during bootstrap.
-   * @param appSchemas Schemas collected from registered applications.
-   * @param coreSchemas Mandatory internal OS schemas.
-   */
   async initializeDatabase(appSchemas: IDbSchema[], coreSchemas: IDbSchema[] = []): Promise<void> {
     if (this.isOpen()) {
       this.close();
@@ -32,16 +28,13 @@ export class CoreDatabaseService extends Dexie {
 
     try {
       await this.open();
-      console.log(`[Core Database] Initialized successfully at version ${version}.`);
+      console.log(`[Core Database] '${this.name}' initialized successfully at version ${version}.`);
     } catch (error) {
       console.error('[Core Database] Critical Initialization Failure:', error);
       throw error;
     }
   }
 
-  /**
-   * Generic access to any dynamic table.
-   */
   getTable<T = any, TKey = any>(tableName: string): Table<T, TKey> {
     return this.table(tableName);
   }

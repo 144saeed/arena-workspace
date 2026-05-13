@@ -105,13 +105,13 @@ export class SystemPortabilityService {
       await this.dbEngine.delete();
 
       await new Promise<void>((resolve, reject) => {
-        const req = indexedDB.deleteDatabase('ArenaMetaDb');
+        // FIX: Dynamically delete the correct meta database
+        const req = indexedDB.deleteDatabase(this.schemaManager.metaDbName);
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);
         req.onblocked = () => resolve();
       });
 
-      // Removed aggressive localStorage/sessionStorage clearing to protect unrelated apps
       window.location.reload();
     } catch (error) {
       throw new FrameworkError('FACTORY_RESET_FAILED', 'Error during factory reset', false, error);

@@ -1,7 +1,8 @@
-import { Injectable } from '@angular/core';
+import { Injectable, Inject, Optional } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
 import { FrameworkError } from '../exceptions/framework-error.exception';
+import { ARENA_APP_NAME } from '../engine/core-engine.service';
 
 interface DbMetaRecord {
   id: number;
@@ -11,32 +12,34 @@ interface DbMetaRecord {
 
 class MetaDatabase extends Dexie {
   public metaStore!: Table<DbMetaRecord, number>;
-
-  constructor() {
-    super('ArenaMetaDb');
-    this.version(1).stores({
-      metaStore: 'id'
-    });
+  constructor(dbName: string) {
+    super(dbName);
+    this.version(1).stores({ metaStore: 'id' });
   }
 }
 
-/**
- * Manages dynamic schema injection and evolution.
- * Utilizes an isolated Meta-Database to track versioning securely.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class SchemaManagerService {
 
-  private readonly metaDb = new MetaDatabase();
+  private metaDb!: MetaDatabase;
   private _systemTables: string[] = [];
+
+  constructor(@Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null) {}
 
   public get systemTables(): string[] {
     return [...this._systemTables];
   }
 
+  public get metaDbName(): string {
+    return this.metaDb.name;
+  }
+
   async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {
+    const dbPrefix = this.appName ? `${this.appName}_` : 'ArenaCore_';
+    this.metaDb = new MetaDatabase(`${dbPrefix}MetaDb`);
+
     const combinedSchema: Record<string, string> = {};
     const allSchemas = [...coreSchemas, ...pluginSchemas];
 
@@ -44,10 +47,9 @@ export class SchemaManagerService {
 
     allSchemas.forEach(schema => {
       if (combinedSchema[schema.tableName]) {
-        // SECURITY/DATA-INTEGRITY FIX: Throw hard error on table name collisions
         throw new FrameworkError(
           'DB_SCHEMA_COLLISION',
-          `Critical Error: Multiple plugins attempted to register the same table name '${schema.tableName}'. This will cause data corruption.`,
+          `Critical Error: Table collision detected for '${schema.tableName}'.`,
           false
         );
       }
@@ -56,6 +58,7 @@ export class SchemaManagerService {
 
     const sortedKeys = Object.keys(combinedSchema).sort();
     const sortedSchema: Record<string, string> = {};
+
     sortedKeys.forEach(key => {
       sortedSchema[key] = combinedSchema[key];
     });
@@ -68,7 +71,6 @@ export class SchemaManagerService {
 
     if (savedSchemaString && savedSchemaString !== currentSchemaString) {
       currentVersion += 1;
-      console.log(`[Schema Manager] Evolution detected. Auto-bumping database to version ${currentVersion}.`);
     }
 
     await this.metaDb.metaStore.put({
@@ -77,9 +79,6 @@ export class SchemaManagerService {
       schemaHash: currentSchemaString
     });
 
-    return {
-      version: currentVersion,
-      dexieSchema: sortedSchema
-    };
+    return { version: currentVersion, dexieSchema: sortedSchema };
   }
 }

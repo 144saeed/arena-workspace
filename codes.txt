@@ -10,6 +10,11 @@ import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
 import { AiToolCallDto } from '../../contracts/dtos/ai-tool-call.dto';
 import { FrameworkError } from '../../exceptions/framework-error.exception';
 
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args: Record<string, unknown> };
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -124,7 +129,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                 let chunkText = '';
                 const toolCalls: AiToolCallDto[] = [];
 
-                parts.forEach((part: any) => {
+                parts.forEach((part: GeminiPart) => {
                   if (part.text) chunkText += part.text;
                   if (part.functionCall) {
                     toolCalls.push({
@@ -153,7 +158,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         if (error.name !== 'AbortError') {
           subscriber.error(error);
         } else {
-          subscriber.complete();
+          subscriber.complete(); 
         }
       });
 
@@ -171,9 +176,15 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   }
 
   private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
+    const generationConfig: Record<string, unknown> = { temperature: request.temperature ?? 0.7 };
+    
+    if (request.expectJson) {
+      generationConfig['responseMimeType'] = 'application/json';
+    }
+
     const payload: Record<string, unknown> = {
       contents: [],
-      generationConfig: { temperature: request.temperature ?? 0.7 }
+      generationConfig
     };
 
     const systemMessages = request.messages.filter(m => m.role === 'system');
@@ -228,10 +239,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }];
     }
 
-    if (request.expectJson) {
-      (payload['generationConfig'] as any).responseMimeType = 'application/json';
-    }
-
     return payload;
   }
 
@@ -241,7 +248,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
     let content = '';
     const toolCalls: AiToolCallDto[] = [];
-
+    
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
@@ -252,7 +259,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         });
       }
     });
-
+    
     return {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
@@ -1055,29 +1062,25 @@ export abstract class BaseRepository<T, TKey> {
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\database\core-database.service.ts
-import { Injectable } from '@angular/core';
+import { Injectable, Inject, Optional } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
 import { SchemaManagerService } from './schema-manager.service';
+import { ARENA_APP_NAME } from '../engine/core-engine.service';
 
-/**
- * The Central Database Engine of the Framework.
- * Configures tables dynamically based on registered applications.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class CoreDatabaseService extends Dexie {
 
-  constructor(private readonly schemaManager: SchemaManagerService) {
-    super('ArenaFrameworkDb');
+  constructor(
+    private readonly schemaManager: SchemaManagerService,
+    @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
+  ) {
+    // FIX: Pass the dynamically injected name directly to Dexie's constructor
+    super(appName ? `${appName}_FrameworkDb` : 'ArenaCore_FallbackDb');
   }
 
-  /**
-   * Initializes the database with schemas. Must be called during bootstrap.
-   * @param appSchemas Schemas collected from registered applications.
-   * @param coreSchemas Mandatory internal OS schemas.
-   */
   async initializeDatabase(appSchemas: IDbSchema[], coreSchemas: IDbSchema[] = []): Promise<void> {
     if (this.isOpen()) {
       this.close();
@@ -1089,26 +1092,24 @@ export class CoreDatabaseService extends Dexie {
 
     try {
       await this.open();
-      console.log(`[Core Database] Initialized successfully at version ${version}.`);
+      console.log(`[Core Database] '${this.name}' initialized successfully at version ${version}.`);
     } catch (error) {
       console.error('[Core Database] Critical Initialization Failure:', error);
       throw error;
     }
   }
 
-  /**
-   * Generic access to any dynamic table.
-   */
   getTable<T = any, TKey = any>(tableName: string): Table<T, TKey> {
     return this.table(tableName);
   }
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\database\schema-manager.service.ts
-import { Injectable } from '@angular/core';
+import { Injectable, Inject, Optional } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
 import { FrameworkError } from '../exceptions/framework-error.exception';
+import { ARENA_APP_NAME } from '../engine/core-engine.service';
 
 interface DbMetaRecord {
   id: number;
@@ -1118,32 +1119,34 @@ interface DbMetaRecord {
 
 class MetaDatabase extends Dexie {
   public metaStore!: Table<DbMetaRecord, number>;
-
-  constructor() {
-    super('ArenaMetaDb');
-    this.version(1).stores({
-      metaStore: 'id'
-    });
+  constructor(dbName: string) {
+    super(dbName);
+    this.version(1).stores({ metaStore: 'id' });
   }
 }
 
-/**
- * Manages dynamic schema injection and evolution.
- * Utilizes an isolated Meta-Database to track versioning securely.
- */
 @Injectable({
   providedIn: 'root'
 })
 export class SchemaManagerService {
 
-  private readonly metaDb = new MetaDatabase();
+  private metaDb!: MetaDatabase;
   private _systemTables: string[] = [];
+
+  constructor(@Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null) {}
 
   public get systemTables(): string[] {
     return [...this._systemTables];
   }
 
+  public get metaDbName(): string {
+    return this.metaDb.name;
+  }
+
   async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {
+    const dbPrefix = this.appName ? `${this.appName}_` : 'ArenaCore_';
+    this.metaDb = new MetaDatabase(`${dbPrefix}MetaDb`);
+
     const combinedSchema: Record<string, string> = {};
     const allSchemas = [...coreSchemas, ...pluginSchemas];
 
@@ -1151,10 +1154,9 @@ export class SchemaManagerService {
 
     allSchemas.forEach(schema => {
       if (combinedSchema[schema.tableName]) {
-        // SECURITY/DATA-INTEGRITY FIX: Throw hard error on table name collisions
         throw new FrameworkError(
           'DB_SCHEMA_COLLISION',
-          `Critical Error: Multiple plugins attempted to register the same table name '${schema.tableName}'. This will cause data corruption.`,
+          `Critical Error: Table collision detected for '${schema.tableName}'.`,
           false
         );
       }
@@ -1163,6 +1165,7 @@ export class SchemaManagerService {
 
     const sortedKeys = Object.keys(combinedSchema).sort();
     const sortedSchema: Record<string, string> = {};
+
     sortedKeys.forEach(key => {
       sortedSchema[key] = combinedSchema[key];
     });
@@ -1175,7 +1178,6 @@ export class SchemaManagerService {
 
     if (savedSchemaString && savedSchemaString !== currentSchemaString) {
       currentVersion += 1;
-      console.log(`[Schema Manager] Evolution detected. Auto-bumping database to version ${currentVersion}.`);
     }
 
     await this.metaDb.metaStore.put({
@@ -1184,15 +1186,12 @@ export class SchemaManagerService {
       schemaHash: currentSchemaString
     });
 
-    return {
-      version: currentVersion,
-      dexieSchema: sortedSchema
-    };
+    return { version: currentVersion, dexieSchema: sortedSchema };
   }
 }
 ------------------------------
 Relative Path: \projects\arena-core\src\lib\engine\core-engine.service.ts
-import { Injectable, signal } from '@angular/core';
+import { Injectable, signal, Inject, Optional, InjectionToken } from '@angular/core';
 import { IAppPlugin } from '../contracts/interfaces/app-plugin.interface';
 import { AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
 import { CoreDatabaseService } from '../database/core-database.service';
@@ -1202,6 +1201,9 @@ import { ProcessMonitorMiddleware } from '../monitor/middlewares/process-monitor
 import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.middleware';
 import { AiRegistryService } from '../ai/ai-registry.service';
 import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
+
+// FIX: Angular InjectionToken to provide the app name BEFORE singletons are instantiated.
+export const ARENA_APP_NAME = new InjectionToken<string>('ARENA_APP_NAME');
 
 @Injectable({
   providedIn: 'root'
@@ -1217,11 +1219,14 @@ export class CoreEngineService {
     private readonly securityService: SecurityService,
     private readonly securityGuard: SecurityGuardMiddleware,
     private readonly processMonitor: ProcessMonitorMiddleware,
-    private readonly aiRegistry: AiRegistryService
+    private readonly aiRegistry: AiRegistryService,
+    @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
   ) { }
 
   async boot(plugins: IAppPlugin[], aiAdapters: AiAdapterConstructor[] = []): Promise<void> {
     if (this.isBooted()) return;
+
+    const activeAppName = this.appName || 'ArenaFallback';
 
     try {
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
@@ -1239,7 +1244,7 @@ export class CoreEngineService {
       }
 
       this._isBooted.set(true);
-      console.log('[Core Engine] Framework booted successfully.');
+      console.log(`[Core Engine] Framework booted successfully for application: ${activeAppName}`);
 
     } catch (error) {
       console.error('[Core Engine] Boot Failure:', error);
@@ -1776,13 +1781,13 @@ export class SystemPortabilityService {
       await this.dbEngine.delete();
 
       await new Promise<void>((resolve, reject) => {
-        const req = indexedDB.deleteDatabase('ArenaMetaDb');
+        // FIX: Dynamically delete the correct meta database
+        const req = indexedDB.deleteDatabase(this.schemaManager.metaDbName);
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);
         req.onblocked = () => resolve();
       });
 
-      // Removed aggressive localStorage/sessionStorage clearing to protect unrelated apps
       window.location.reload();
     } catch (error) {
       throw new FrameworkError('FACTORY_RESET_FAILED', 'Error during factory reset', false, error);

@@ -9,6 +9,11 @@ import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
 import { AiToolCallDto } from '../../contracts/dtos/ai-tool-call.dto';
 import { FrameworkError } from '../../exceptions/framework-error.exception';
 
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args: Record<string, unknown> };
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -123,7 +128,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                 let chunkText = '';
                 const toolCalls: AiToolCallDto[] = [];
 
-                parts.forEach((part: any) => {
+                parts.forEach((part: GeminiPart) => {
                   if (part.text) chunkText += part.text;
                   if (part.functionCall) {
                     toolCalls.push({
@@ -152,7 +157,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         if (error.name !== 'AbortError') {
           subscriber.error(error);
         } else {
-          subscriber.complete();
+          subscriber.complete(); 
         }
       });
 
@@ -170,9 +175,15 @@ export class GoogleGeminiAdapter implements IAiAdapter {
   }
 
   private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
+    const generationConfig: Record<string, unknown> = { temperature: request.temperature ?? 0.7 };
+    
+    if (request.expectJson) {
+      generationConfig['responseMimeType'] = 'application/json';
+    }
+
     const payload: Record<string, unknown> = {
       contents: [],
-      generationConfig: { temperature: request.temperature ?? 0.7 }
+      generationConfig
     };
 
     const systemMessages = request.messages.filter(m => m.role === 'system');
@@ -227,10 +238,6 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       }];
     }
 
-    if (request.expectJson) {
-      (payload['generationConfig'] as any).responseMimeType = 'application/json';
-    }
-
     return payload;
   }
 
@@ -240,7 +247,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
     let content = '';
     const toolCalls: AiToolCallDto[] = [];
-
+    
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
@@ -251,7 +258,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         });
       }
     });
-
+    
     return {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,

@@ -1,4 +1,4 @@
-import { Injectable, signal } from '@angular/core';
+import { Injectable, signal, Inject, Optional, InjectionToken } from '@angular/core';
 import { IAppPlugin } from '../contracts/interfaces/app-plugin.interface';
 import { AiAdapterConstructor } from '../contracts/interfaces/ai-adapter.interface';
 import { CoreDatabaseService } from '../database/core-database.service';
@@ -8,6 +8,9 @@ import { ProcessMonitorMiddleware } from '../monitor/middlewares/process-monitor
 import { SecurityGuardMiddleware } from '../security/middlewares/security-guard.middleware';
 import { AiRegistryService } from '../ai/ai-registry.service';
 import { OS_MANDATORY_SCHEMAS } from '../database/constants/os-schemas.constant';
+
+// FIX: Angular InjectionToken to provide the app name BEFORE singletons are instantiated.
+export const ARENA_APP_NAME = new InjectionToken<string>('ARENA_APP_NAME');
 
 @Injectable({
   providedIn: 'root'
@@ -23,11 +26,14 @@ export class CoreEngineService {
     private readonly securityService: SecurityService,
     private readonly securityGuard: SecurityGuardMiddleware,
     private readonly processMonitor: ProcessMonitorMiddleware,
-    private readonly aiRegistry: AiRegistryService
+    private readonly aiRegistry: AiRegistryService,
+    @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
   ) { }
 
   async boot(plugins: IAppPlugin[], aiAdapters: AiAdapterConstructor[] = []): Promise<void> {
     if (this.isBooted()) return;
+
+    const activeAppName = this.appName || 'ArenaFallback';
 
     try {
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
@@ -45,7 +51,7 @@ export class CoreEngineService {
       }
 
       this._isBooted.set(true);
-      console.log('[Core Engine] Framework booted successfully.');
+      console.log(`[Core Engine] Framework booted successfully for application: ${activeAppName}`);
 
     } catch (error) {
       console.error('[Core Engine] Boot Failure:', error);
