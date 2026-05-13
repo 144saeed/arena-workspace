@@ -47,3 +47,6 @@ export * from './lib/contracts/dtos/ai-event.dto';
 // 5. Security & Exceptions
 export * from './lib/security/security.service';
 export * from './lib/exceptions/framework-error.exception';
+
+// 6. wiring
+export * from './lib/providers/arena-core.provider';
