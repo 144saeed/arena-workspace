@@ -7,6 +7,7 @@ import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
 import { AiEventDto } from '../../contracts/dtos/ai-event.dto';
 import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
+import { AiToolCallDto } from '../../contracts/dtos/ai-tool-call.dto';
 import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 @Injectable({
@@ -121,7 +122,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
                 const parts = candidate.content?.parts || [];
                 let chunkText = '';
-                const toolCalls: Record<string, unknown>[] = [];
+                const toolCalls: AiToolCallDto[] = [];
 
                 parts.forEach((part: any) => {
                   if (part.text) chunkText += part.text;
@@ -129,7 +130,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                     toolCalls.push({
                       id: crypto.randomUUID(),
                       name: part.functionCall.name,
-                      arguments: part.functionCall.args
+                      arguments: part.functionCall.args as Record<string, any>
                     });
                   }
                 });
@@ -138,7 +139,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   subscriber.next({ type: 'chunk', content: chunkText });
                 }
                 if (toolCalls.length > 0) {
-                  subscriber.next({ type: 'tool-call', toolCalls: toolCalls as any });
+                  subscriber.next({ type: 'tool-call', toolCalls });
                 }
               } catch (e) {
                 // Ignore parse errors on incomplete chunks
@@ -239,7 +240,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const parts = candidate?.content?.parts || [];
 
     let content = '';
-    const toolCalls: Record<string, unknown>[] = [];
+    const toolCalls: AiToolCallDto[] = [];
 
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
@@ -247,7 +248,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         toolCalls.push({
           id: crypto.randomUUID(),
           name: part.functionCall.name,
-          arguments: part.functionCall.args
+          arguments: part.functionCall.args as Record<string, any>
         });
       }
     });
@@ -256,7 +257,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
-      toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined
     };
   }
 }
@@ -324,7 +325,6 @@ export class AgentExecutorService {
 
         try {
           const executionPromises = response.toolCalls.map(async (toolCall) => {
-            console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
             const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
             if (result.status === 'fatal_error') {
@@ -353,7 +353,6 @@ export class AgentExecutorService {
             }
           }
 
-          // FIX: Throw early before mutating state to resolve design smell
           if (hasFatalError) {
             throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
           }
@@ -756,22 +755,17 @@ Relative Path: \projects\arena-core\src\lib\contracts\dtos\vault-entity.entity.t
  * Represents the single master lock record in the local database.
  */
 export interface VaultEntity {
-    /** * Always 1, as there is only one master vault */
     readonly id: number;
 
-    /** * Randomly generated salt used for hashing and key derivation */
-    readonly salt: string;
+    /** * Salt exclusively used for verifying the master password (Login) */
+    readonly loginSalt: string;
 
-    /** * SHA-256 hash of the master password + salt (used for login verification) */
+    /** * Salt exclusively used for deriving the AES-GCM encryption key */
+    readonly encryptionSalt: string;
+
     readonly hashedPassword: string;
-
-    /** * Versioning for future cryptographic upgrades */
     readonly vaultVersion: number;
-
-    /** * ARCHITECTURE FIX: Persisted failed attempts to thwart reload-based brute-force attacks */
     readonly failedAttempts?: number;
-
-    /** * Timestamp of the last failed attempt to calculate penalty timeouts */
     readonly lastFailedAttempt?: number;
 }
 ------------------------------
@@ -1605,13 +1599,23 @@ export class SecurityService {
       throw new FrameworkError('WEAK_PASSWORD', 'Master password must be at least 8 characters long and contain both letters and numbers.', false);
     }
 
-    const salt = this.cryptoService.generateSalt();
-    const hashedPassword = await this.cryptoService.hashPassword(password, salt);
+    // FIX: Cryptographic isolation. Independent salts for authentication and encryption.
+    const loginSalt = this.cryptoService.generateSalt();
+    const encryptionSalt = this.cryptoService.generateSalt();
+
+    const hashedPassword = await this.cryptoService.hashPassword(password, loginSalt);
 
     await this.vaultRepo.create({
-      id: 1, salt, hashedPassword, vaultVersion: 1, failedAttempts: 0, lastFailedAttempt: 0
+      id: 1,
+      loginSalt,
+      encryptionSalt,
+      hashedPassword,
+      vaultVersion: 1,
+      failedAttempts: 0,
+      lastFailedAttempt: 0
     });
-    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
+
+    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, encryptionSalt);
     this._isVaultUnlocked.set(true);
   }
 
@@ -1626,7 +1630,7 @@ export class SecurityService {
       const vault = await this.vaultRepo.getMasterVault();
       if (!vault) throw new FrameworkError('VAULT_MISSING', 'No vault found. Setup required.', false);
 
-      const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
+      const loginHash = await this.cryptoService.hashPassword(password, vault.loginSalt);
 
       if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
         const currentAttempts = (vault.failedAttempts || 0) + 1;
@@ -1641,7 +1645,7 @@ export class SecurityService {
         await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
       }
 
-      this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
+      this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.encryptionSalt);
       this._isVaultUnlocked.set(true);
 
       return true;

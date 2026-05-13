@@ -33,13 +33,23 @@ export class SecurityService {
       throw new FrameworkError('WEAK_PASSWORD', 'Master password must be at least 8 characters long and contain both letters and numbers.', false);
     }
 
-    const salt = this.cryptoService.generateSalt();
-    const hashedPassword = await this.cryptoService.hashPassword(password, salt);
+    // FIX: Cryptographic isolation. Independent salts for authentication and encryption.
+    const loginSalt = this.cryptoService.generateSalt();
+    const encryptionSalt = this.cryptoService.generateSalt();
+
+    const hashedPassword = await this.cryptoService.hashPassword(password, loginSalt);
 
     await this.vaultRepo.create({
-      id: 1, salt, hashedPassword, vaultVersion: 1, failedAttempts: 0, lastFailedAttempt: 0
+      id: 1,
+      loginSalt,
+      encryptionSalt,
+      hashedPassword,
+      vaultVersion: 1,
+      failedAttempts: 0,
+      lastFailedAttempt: 0
     });
-    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, salt);
+
+    this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, encryptionSalt);
     this._isVaultUnlocked.set(true);
   }
 
@@ -54,7 +64,7 @@ export class SecurityService {
       const vault = await this.vaultRepo.getMasterVault();
       if (!vault) throw new FrameworkError('VAULT_MISSING', 'No vault found. Setup required.', false);
 
-      const loginHash = await this.cryptoService.hashPassword(password, vault.salt);
+      const loginHash = await this.cryptoService.hashPassword(password, vault.loginSalt);
 
       if (!this.cryptoService.constantTimeCompare(loginHash, vault.hashedPassword)) {
         const currentAttempts = (vault.failedAttempts || 0) + 1;
@@ -69,7 +79,7 @@ export class SecurityService {
         await this.vaultRepo.update(1, { failedAttempts: 0, lastFailedAttempt: 0 });
       }
 
-      this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.salt);
+      this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, vault.encryptionSalt);
       this._isVaultUnlocked.set(true);
 
       return true;

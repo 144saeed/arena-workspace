@@ -2,21 +2,16 @@
  * Represents the single master lock record in the local database.
  */
 export interface VaultEntity {
-    /** * Always 1, as there is only one master vault */
     readonly id: number;
 
-    /** * Randomly generated salt used for hashing and key derivation */
-    readonly salt: string;
+    /** * Salt exclusively used for verifying the master password (Login) */
+    readonly loginSalt: string;
 
-    /** * SHA-256 hash of the master password + salt (used for login verification) */
+    /** * Salt exclusively used for deriving the AES-GCM encryption key */
+    readonly encryptionSalt: string;
+
     readonly hashedPassword: string;
-
-    /** * Versioning for future cryptographic upgrades */
     readonly vaultVersion: number;
-
-    /** * ARCHITECTURE FIX: Persisted failed attempts to thwart reload-based brute-force attacks */
     readonly failedAttempts?: number;
-
-    /** * Timestamp of the last failed attempt to calculate penalty timeouts */
     readonly lastFailedAttempt?: number;
 }

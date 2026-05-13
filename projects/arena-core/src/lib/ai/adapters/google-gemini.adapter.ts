@@ -6,6 +6,7 @@ import { AiRequestDto } from '../../contracts/dtos/ai-request.dto';
 import { AiResponseDto } from '../../contracts/dtos/ai-response.dto';
 import { AiEventDto } from '../../contracts/dtos/ai-event.dto';
 import { AiCapabilitiesDto } from '../../contracts/dtos/ai-capabilities.dto';
+import { AiToolCallDto } from '../../contracts/dtos/ai-tool-call.dto';
 import { FrameworkError } from '../../exceptions/framework-error.exception';
 
 @Injectable({
@@ -120,7 +121,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
                 const parts = candidate.content?.parts || [];
                 let chunkText = '';
-                const toolCalls: Record<string, unknown>[] = [];
+                const toolCalls: AiToolCallDto[] = [];
 
                 parts.forEach((part: any) => {
                   if (part.text) chunkText += part.text;
@@ -128,7 +129,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                     toolCalls.push({
                       id: crypto.randomUUID(),
                       name: part.functionCall.name,
-                      arguments: part.functionCall.args
+                      arguments: part.functionCall.args as Record<string, any>
                     });
                   }
                 });
@@ -137,7 +138,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
                   subscriber.next({ type: 'chunk', content: chunkText });
                 }
                 if (toolCalls.length > 0) {
-                  subscriber.next({ type: 'tool-call', toolCalls: toolCalls as any });
+                  subscriber.next({ type: 'tool-call', toolCalls });
                 }
               } catch (e) {
                 // Ignore parse errors on incomplete chunks
@@ -238,7 +239,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     const parts = candidate?.content?.parts || [];
 
     let content = '';
-    const toolCalls: Record<string, unknown>[] = [];
+    const toolCalls: AiToolCallDto[] = [];
 
     parts.forEach((part: any) => {
       if (part.text) content += part.text;
@@ -246,7 +247,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         toolCalls.push({
           id: crypto.randomUUID(),
           name: part.functionCall.name,
-          arguments: part.functionCall.args
+          arguments: part.functionCall.args as Record<string, any>
         });
       }
     });
@@ -255,7 +256,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,
       providerId: GoogleGeminiAdapter.providerId,
-      toolCalls: toolCalls.length > 0 ? (toolCalls as any) : undefined
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined
     };
   }
 }

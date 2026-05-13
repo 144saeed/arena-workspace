@@ -60,7 +60,6 @@ export class AgentExecutorService {
 
         try {
           const executionPromises = response.toolCalls.map(async (toolCall) => {
-            console.log(`[Agent Executor] Iteration ${iterationCount}: Executing tool '${toolCall.name}'...`);
             const result = await this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, batchAbortController.signal);
 
             if (result.status === 'fatal_error') {
@@ -89,7 +88,6 @@ export class AgentExecutorService {
             }
           }
 
-          // FIX: Throw early before mutating state to resolve design smell
           if (hasFatalError) {
             throw new FrameworkError('AGENT_FATAL_TOOL_ERROR', `Agent halted due to a fatal error in tool execution: ${fatalErrorMessage}`, false);
           }
