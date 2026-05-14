@@ -27,3 +27,7 @@
 ## 7. Comprehensive Unit Testing (QA)
 - **Issue:** Core logic lacks automated tests.
 - **Action:** Write strict unit tests for `CryptoService`, `AgentExecutor`, and `SchemaManager`.
+
+## 8. Vault Auto-Lock (Security Enhancements)
+- **Issue:** The OS Vault currently remains unlocked indefinitely until manually locked or a page reload occurs.
+- **Action:** Implement a configurable inactivity timeout mechanism (e.g., `vaultTimeoutMs`) within `SecurityService` or `CoreEngineService` to automatically lock the vault and protect AI profiles.
