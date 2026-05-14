@@ -2,8 +2,9 @@ import { Injectable, Inject, Optional } from '@angular/core';
 import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
 import { FrameworkError } from '../exceptions/framework-error.exception';
-import { ARENA_APP_NAME } from '../engine/core-engine.service';
-import { getIsolatedDbPrefix } from './core-database.service';
+import { ARENA_APP_IDENTITY } from '../engine/core-engine.service';
+import { AppIdentity } from '../contracts/interfaces/app-identity.interface';
+import { resolveAndValidateDbPrefix } from './core-database.service';
 
 interface DbMetaRecord {
   id: number;
@@ -28,7 +29,7 @@ export class SchemaManagerService {
   private metaDb!: MetaDatabase;
   private _systemTables: string[] = [];
 
-  constructor(@Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null) { }
+  constructor(@Optional() @Inject(ARENA_APP_IDENTITY) private readonly appIdentity: AppIdentity | null) { }
 
   public get systemTables(): string[] {
     return [...this._systemTables];
@@ -39,8 +40,7 @@ export class SchemaManagerService {
   }
 
   async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {
-    // Apply Auto-Isolation to Meta Database as well
-    const dbPrefix = getIsolatedDbPrefix(this.appName);
+    const dbPrefix = resolveAndValidateDbPrefix(this.appIdentity);
     this.metaDb = new MetaDatabase(`${dbPrefix}_MetaDb`);
 
     const combinedSchema: Record<string, string> = {};
@@ -67,7 +67,6 @@ export class SchemaManagerService {
     });
 
     const currentSchemaString = JSON.stringify(sortedSchema);
-
     const metaRecord = await this.metaDb.metaStore.get(1);
 
     let currentVersion = metaRecord?.version || 1;

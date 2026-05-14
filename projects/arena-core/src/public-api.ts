@@ -50,3 +50,4 @@ export * from './lib/exceptions/framework-error.exception';
 
 // 6. wiring
 export * from './lib/providers/arena-core.provider';
+export * from './lib/contracts/interfaces/app-identity.interface';
