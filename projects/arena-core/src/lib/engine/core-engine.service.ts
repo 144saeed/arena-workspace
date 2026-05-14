@@ -36,13 +36,21 @@ export class CoreEngineService {
 
     try {
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
+
+      // 1. Initialize Database
       await this.databaseEngine.initializeDatabase(pluginSchemas, OS_MANDATORY_SCHEMAS);
 
+      // 2. Initialize Security State (NEW)
+      await this.securityService.initializeState();
+
+      // 3. Register AI Adapters
       aiAdapters.forEach(adapterClass => this.aiRegistry.registerAdapter(adapterClass));
 
+      // 4. Wire up Middlewares
       this.coreBus.useMiddleware(this.processMonitor);
       this.coreBus.useMiddleware(this.securityGuard);
 
+      // 5. Register Plugins
       plugins.forEach(plugin => plugin.registerHandlers(this.coreBus));
 
       if (!this.securityService.isVaultUnlocked()) {

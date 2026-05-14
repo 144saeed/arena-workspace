@@ -17,7 +17,7 @@ export interface ProfileConnectionState {
 })
 export class AiConnectionMonitorService {
 
-  // SECURITY FIX: Expose map as readonly to prevent external component mutations
+  /** Maintains an immutable state map to prevent unauthorized external mutations. */
   private readonly _connectionStates = signal<Map<string, ProfileConnectionState>>(new Map());
   public readonly connectionStates = this._connectionStates.asReadonly();
 

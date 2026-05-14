@@ -1033,14 +1033,17 @@ import { CoreDatabaseService } from './core-database.service';
  */
 export abstract class BaseRepository<T, TKey> {
 
-    protected readonly table: Table<T, TKey>;
+    /**
+     * Dynamically fetches the Dexie table to prevent 'InvalidTableError' during Angular DI initialization.
+     */
+    protected get table(): Table<T, TKey> {
+        return this.dbEngine.getTable<T, TKey>(this.tableName);
+    }
 
     constructor(
         protected readonly dbEngine: CoreDatabaseService,
         protected readonly tableName: string
-    ) {
-        this.table = this.dbEngine.getTable<T, TKey>(this.tableName);
-    }
+    ) { }
 
     async getAll(): Promise<T[]> {
         return await this.table.toArray();
@@ -1055,7 +1058,6 @@ export abstract class BaseRepository<T, TKey> {
     }
 
     async update(id: TKey, changes: Partial<T>): Promise<number> {
-        // Dexie's update expects a specific format, hence the any cast internally
         return await this.table.update(id, changes as any);
     }
 
@@ -1075,6 +1077,20 @@ import { IDbSchema } from './types/db-schema.type';
 import { SchemaManagerService } from './schema-manager.service';
 import { ARENA_APP_NAME } from '../engine/core-engine.service';
 
+/**
+ * Generates a physically isolated database prefix by binding the App Name 
+ * to the browser's current URL path. Prevents collision on shared domains (e.g., GitHub Pages).
+ */
+export function getIsolatedDbPrefix(appName: string | null): string {
+  const baseName = appName || 'ArenaCore';
+  if (typeof window !== 'undefined') {
+    // Convert path like '/my-app/' to 'my_app'
+    const pathSuffix = window.location.pathname.replace(/[^a-zA-Z0-9]/g, '_').replace(/^_+|_+$/g, '');
+    return pathSuffix ? `${baseName}_${pathSuffix}` : baseName;
+  }
+  return baseName;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -1084,7 +1100,8 @@ export class CoreDatabaseService extends Dexie {
     private readonly schemaManager: SchemaManagerService,
     @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
   ) {
-    super(appName ? `${appName}_FrameworkDb` : 'ArenaCore_FallbackDb');
+    const dbPrefix = getIsolatedDbPrefix(appName);
+    super(`${dbPrefix}_FrameworkDb`);
   }
 
   async initializeDatabase(appSchemas: IDbSchema[], coreSchemas: IDbSchema[] = []): Promise<void> {
@@ -1116,6 +1133,7 @@ import Dexie, { Table } from 'dexie';
 import { IDbSchema } from './types/db-schema.type';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 import { ARENA_APP_NAME } from '../engine/core-engine.service';
+import { getIsolatedDbPrefix } from './core-database.service';
 
 interface DbMetaRecord {
   id: number;
@@ -1125,6 +1143,7 @@ interface DbMetaRecord {
 
 class MetaDatabase extends Dexie {
   public metaStore!: Table<DbMetaRecord, number>;
+
   constructor(dbName: string) {
     super(dbName);
     this.version(1).stores({ metaStore: 'id' });
@@ -1139,7 +1158,7 @@ export class SchemaManagerService {
   private metaDb!: MetaDatabase;
   private _systemTables: string[] = [];
 
-  constructor(@Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null) {}
+  constructor(@Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null) { }
 
   public get systemTables(): string[] {
     return [...this._systemTables];
@@ -1150,8 +1169,9 @@ export class SchemaManagerService {
   }
 
   async processSchemas(pluginSchemas: IDbSchema[], coreSchemas: IDbSchema[]): Promise<{ version: number; dexieSchema: Record<string, string> }> {
-    const dbPrefix = this.appName ? `${this.appName}_` : 'ArenaCore_';
-    this.metaDb = new MetaDatabase(`${dbPrefix}MetaDb`);
+    // Apply Auto-Isolation to Meta Database as well
+    const dbPrefix = getIsolatedDbPrefix(this.appName);
+    this.metaDb = new MetaDatabase(`${dbPrefix}_MetaDb`);
 
     const combinedSchema: Record<string, string> = {};
     const allSchemas = [...coreSchemas, ...pluginSchemas];
@@ -1177,6 +1197,7 @@ export class SchemaManagerService {
     });
 
     const currentSchemaString = JSON.stringify(sortedSchema);
+
     const metaRecord = await this.metaDb.metaStore.get(1);
 
     let currentVersion = metaRecord?.version || 1;
@@ -1235,13 +1256,21 @@ export class CoreEngineService {
 
     try {
       const pluginSchemas = plugins.flatMap(p => p.requiredDbSchemas);
+
+      // 1. Initialize Database
       await this.databaseEngine.initializeDatabase(pluginSchemas, OS_MANDATORY_SCHEMAS);
 
+      // 2. Initialize Security State (NEW)
+      await this.securityService.initializeState();
+
+      // 3. Register AI Adapters
       aiAdapters.forEach(adapterClass => this.aiRegistry.registerAdapter(adapterClass));
 
+      // 4. Wire up Middlewares
       this.coreBus.useMiddleware(this.processMonitor);
       this.coreBus.useMiddleware(this.securityGuard);
 
+      // 5. Register Plugins
       plugins.forEach(plugin => plugin.registerHandlers(this.coreBus));
 
       if (!this.securityService.isVaultUnlocked()) {
@@ -1387,7 +1416,7 @@ export interface ProfileConnectionState {
 })
 export class AiConnectionMonitorService {
 
-  // SECURITY FIX: Expose map as readonly to prevent external component mutations
+  /** Maintains an immutable state map to prevent unauthorized external mutations. */
   private readonly _connectionStates = signal<Map<string, ProfileConnectionState>>(new Map());
   public readonly connectionStates = this._connectionStates.asReadonly();
 
@@ -1426,8 +1455,7 @@ export class SystemMonitorService {
   public startProcess(): void {
     this.activeProcesses++;
     this._isProcessing.set(true);
-    // ARCHITECTURE FIX: Do NOT clear _latestError here to prevent hiding existing 
-    // unread errors from the UI during concurrent requests.
+    /** Preserves existing unread errors from being overwritten during concurrent process initializations. */
   }
 
   public endProcess(): void {
@@ -1612,6 +1640,8 @@ Relative Path: \projects\arena-core\src\lib\security\security.service.ts
 import { Injectable, signal } from '@angular/core';
 import { CryptoService } from './crypto.service';
 import { VaultRepository } from '../database/repositories/vault-repository.repository';
+import { AiProfileRepository } from '../database/repositories/ai-profile-repository.repository';
+import { CoreDatabaseService } from '../database/core-database.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
 @Injectable({
@@ -1622,13 +1652,27 @@ export class SecurityService {
   private readonly _isVaultUnlocked = signal<boolean>(false);
   public readonly isVaultUnlocked = this._isVaultUnlocked.asReadonly();
 
+  private readonly _isVaultConfigured = signal<boolean>(false);
+  public readonly isVaultConfigured = this._isVaultConfigured.asReadonly();
+
   private sessionMasterKey: CryptoKey | null = null;
   private isUnlocking = false;
 
   constructor(
     private readonly cryptoService: CryptoService,
-    private readonly vaultRepo: VaultRepository
+    private readonly vaultRepo: VaultRepository,
+    private readonly aiProfileRepo: AiProfileRepository,
+    private readonly dbEngine: CoreDatabaseService
   ) { }
+
+  /**
+   * Initializes the vault configuration state.
+   * Called by the CoreEngine during the boot sequence.
+   */
+  async initializeState(): Promise<void> {
+    const vault = await this.vaultRepo.getMasterVault();
+    this._isVaultConfigured.set(!!vault);
+  }
 
   async setupVault(password: string): Promise<void> {
     let vault;
@@ -1644,7 +1688,6 @@ export class SecurityService {
       throw new FrameworkError('WEAK_PASSWORD', 'Master password must be at least 8 characters long and contain both letters and numbers.', false);
     }
 
-    // FIX: Cryptographic isolation. Independent salts for authentication and encryption.
     const loginSalt = this.cryptoService.generateSalt();
     const encryptionSalt = this.cryptoService.generateSalt();
 
@@ -1662,6 +1705,7 @@ export class SecurityService {
 
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, encryptionSalt);
     this._isVaultUnlocked.set(true);
+    this._isVaultConfigured.set(true);
   }
 
   async unlockVault(password: string): Promise<boolean> {
@@ -1694,7 +1738,6 @@ export class SecurityService {
       this._isVaultUnlocked.set(true);
 
       return true;
-
     } finally {
       this.isUnlocking = false;
     }
@@ -1703,6 +1746,30 @@ export class SecurityService {
   lockVault(): void {
     this.sessionMasterKey = null;
     this._isVaultUnlocked.set(false);
+  }
+
+  /**
+   * Cryptographically shreds the vault and all dead AI profiles.
+   * Executed within an ACID transaction to prevent orphaned data.
+   */
+  async destroyVault(): Promise<void> {
+    await this.dbEngine.transaction('rw', 'os_vault', 'os_ai_profiles', async () => {
+      // 1. Destroy the master lock
+      await this.vaultRepo.delete(1);
+
+      // 2. Shred all orphaned profiles
+      const profiles = await this.aiProfileRepo.getAll();
+      for (const profile of profiles) {
+        await this.aiProfileRepo.delete(profile.profileId);
+      }
+    });
+
+    // 3. Reset runtime state after successful transaction
+    this.sessionMasterKey = null;
+    this._isVaultUnlocked.set(false);
+    this._isVaultConfigured.set(false);
+
+    console.warn('[Security Service] Vault and all associated profiles have been cryptographically shredded.');
   }
 
   getSessionKey(): CryptoKey {
@@ -1985,6 +2052,10 @@ Relative Path: \projects\arena-core\todo.md
 ## 7. Comprehensive Unit Testing (QA)
 - **Issue:** Core logic lacks automated tests.
 - **Action:** Write strict unit tests for `CryptoService`, `AgentExecutor`, and `SchemaManager`.
+
+## 8. Vault Auto-Lock (Security Enhancements)
+- **Issue:** The OS Vault currently remains unlocked indefinitely until manually locked or a page reload occurs.
+- **Action:** Implement a configurable inactivity timeout mechanism (e.g., `vaultTimeoutMs`) within `SecurityService` or `CoreEngineService` to automatically lock the vault and protect AI profiles.
 ------------------------------
 Relative Path: \README.md
 # ArenaWorkspace

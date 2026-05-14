@@ -16,8 +16,7 @@ export class SystemMonitorService {
   public startProcess(): void {
     this.activeProcesses++;
     this._isProcessing.set(true);
-    // ARCHITECTURE FIX: Do NOT clear _latestError here to prevent hiding existing 
-    // unread errors from the UI during concurrent requests.
+    /** Preserves existing unread errors from being overwritten during concurrent process initializations. */
   }
 
   public endProcess(): void {

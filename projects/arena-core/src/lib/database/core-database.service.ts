@@ -4,6 +4,20 @@ import { IDbSchema } from './types/db-schema.type';
 import { SchemaManagerService } from './schema-manager.service';
 import { ARENA_APP_NAME } from '../engine/core-engine.service';
 
+/**
+ * Generates a physically isolated database prefix by binding the App Name 
+ * to the browser's current URL path. Prevents collision on shared domains (e.g., GitHub Pages).
+ */
+export function getIsolatedDbPrefix(appName: string | null): string {
+  const baseName = appName || 'ArenaCore';
+  if (typeof window !== 'undefined') {
+    // Convert path like '/my-app/' to 'my_app'
+    const pathSuffix = window.location.pathname.replace(/[^a-zA-Z0-9]/g, '_').replace(/^_+|_+$/g, '');
+    return pathSuffix ? `${baseName}_${pathSuffix}` : baseName;
+  }
+  return baseName;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -13,7 +27,8 @@ export class CoreDatabaseService extends Dexie {
     private readonly schemaManager: SchemaManagerService,
     @Optional() @Inject(ARENA_APP_NAME) private readonly appName: string | null
   ) {
-    super(appName ? `${appName}_FrameworkDb` : 'ArenaCore_FallbackDb');
+    const dbPrefix = getIsolatedDbPrefix(appName);
+    super(`${dbPrefix}_FrameworkDb`);
   }
 
   async initializeDatabase(appSchemas: IDbSchema[], coreSchemas: IDbSchema[] = []): Promise<void> {

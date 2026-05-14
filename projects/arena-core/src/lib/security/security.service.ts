@@ -1,6 +1,8 @@
 import { Injectable, signal } from '@angular/core';
 import { CryptoService } from './crypto.service';
 import { VaultRepository } from '../database/repositories/vault-repository.repository';
+import { AiProfileRepository } from '../database/repositories/ai-profile-repository.repository';
+import { CoreDatabaseService } from '../database/core-database.service';
 import { FrameworkError } from '../exceptions/framework-error.exception';
 
 @Injectable({
@@ -11,13 +13,27 @@ export class SecurityService {
   private readonly _isVaultUnlocked = signal<boolean>(false);
   public readonly isVaultUnlocked = this._isVaultUnlocked.asReadonly();
 
+  private readonly _isVaultConfigured = signal<boolean>(false);
+  public readonly isVaultConfigured = this._isVaultConfigured.asReadonly();
+
   private sessionMasterKey: CryptoKey | null = null;
   private isUnlocking = false;
 
   constructor(
     private readonly cryptoService: CryptoService,
-    private readonly vaultRepo: VaultRepository
+    private readonly vaultRepo: VaultRepository,
+    private readonly aiProfileRepo: AiProfileRepository,
+    private readonly dbEngine: CoreDatabaseService
   ) { }
+
+  /**
+   * Initializes the vault configuration state.
+   * Called by the CoreEngine during the boot sequence.
+   */
+  async initializeState(): Promise<void> {
+    const vault = await this.vaultRepo.getMasterVault();
+    this._isVaultConfigured.set(!!vault);
+  }
 
   async setupVault(password: string): Promise<void> {
     let vault;
@@ -33,7 +49,6 @@ export class SecurityService {
       throw new FrameworkError('WEAK_PASSWORD', 'Master password must be at least 8 characters long and contain both letters and numbers.', false);
     }
 
-    // FIX: Cryptographic isolation. Independent salts for authentication and encryption.
     const loginSalt = this.cryptoService.generateSalt();
     const encryptionSalt = this.cryptoService.generateSalt();
 
@@ -51,6 +66,7 @@ export class SecurityService {
 
     this.sessionMasterKey = await this.cryptoService.deriveMasterKey(password, encryptionSalt);
     this._isVaultUnlocked.set(true);
+    this._isVaultConfigured.set(true);
   }
 
   async unlockVault(password: string): Promise<boolean> {
@@ -83,7 +99,6 @@ export class SecurityService {
       this._isVaultUnlocked.set(true);
 
       return true;
-
     } finally {
       this.isUnlocking = false;
     }
@@ -92,6 +107,30 @@ export class SecurityService {
   lockVault(): void {
     this.sessionMasterKey = null;
     this._isVaultUnlocked.set(false);
+  }
+
+  /**
+   * Cryptographically shreds the vault and all dead AI profiles.
+   * Executed within an ACID transaction to prevent orphaned data.
+   */
+  async destroyVault(): Promise<void> {
+    await this.dbEngine.transaction('rw', 'os_vault', 'os_ai_profiles', async () => {
+      // 1. Destroy the master lock
+      await this.vaultRepo.delete(1);
+
+      // 2. Shred all orphaned profiles
+      const profiles = await this.aiProfileRepo.getAll();
+      for (const profile of profiles) {
+        await this.aiProfileRepo.delete(profile.profileId);
+      }
+    });
+
+    // 3. Reset runtime state after successful transaction
+    this.sessionMasterKey = null;
+    this._isVaultUnlocked.set(false);
+    this._isVaultConfigured.set(false);
+
+    console.warn('[Security Service] Vault and all associated profiles have been cryptographically shredded.');
   }
 
   getSessionKey(): CryptoKey {
