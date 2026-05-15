@@ -48,6 +48,17 @@ export class SchemaManagerService {
 
     this._systemTables = allSchemas.filter(s => s.isSystem).map(s => s.tableName);
 
+    // 🛡️ Security Firewall: Prevent user-space from creating system tables
+    pluginSchemas.forEach(schema => {
+      if (schema.tableName.startsWith('os_')) {
+        throw new FrameworkError(
+          'SECURITY_VIOLATION',
+          `Critical Security Error: Developers cannot register tables starting with 'os_'. The table '${schema.tableName}' is blocked.`,
+          true
+        );
+      }
+    });
+
     allSchemas.forEach(schema => {
       if (combinedSchema[schema.tableName]) {
         throw new FrameworkError(

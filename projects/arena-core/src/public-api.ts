@@ -21,6 +21,8 @@ export * from './lib/contracts/interfaces/command.interface';
 export * from './lib/contracts/interfaces/query.interface';
 export * from './lib/contracts/interfaces/message-handler.interface';
 export * from './lib/database/base-repository.class';
+export * from './lib/database/types/db-schema.type';
+export * from './lib/database/public-data-store.service';
 
 // 4. AI Gateway & Agent Architecture
 export * from './lib/ai/ai-gateway.service';
