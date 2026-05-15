@@ -18,11 +18,11 @@ export class PublicDataStoreService {
   /**
    * Retrieves a Dexie Table instance for application-space operations.
    * Throws a security error if an attempt is made to access 'os_' system tables.
-   * * @param tableName The name of the registered application table.
+   * @param tableName The name of the registered application table.
    * @returns Dexie.Table instance with full IntelliSense support.
    */
   public getTable<TEntity, TKey = any>(tableName: string): Table<TEntity, TKey> {
-    if (tableName.startsWith('os_')) {
+    if (tableName.toLowerCase().startsWith('os_')) {
       throw new FrameworkError(
         'SECURITY_VIOLATION',
         `Access Denied: Attempted to directly access the system table '${tableName}'. System tables must be accessed via their respective Command/Query interfaces.`,

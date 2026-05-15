@@ -44,13 +44,14 @@ export class SchemaManagerService {
     this.metaDb = new MetaDatabase(`${dbPrefix}_MetaDb`);
 
     const combinedSchema: Record<string, string> = {};
+    const normalizedNames = new Set<string>();
     const allSchemas = [...coreSchemas, ...pluginSchemas];
 
     this._systemTables = allSchemas.filter(s => s.isSystem).map(s => s.tableName);
 
-    // 🛡️ Security Firewall: Prevent user-space from creating system tables
+    // Security Firewall: Prevent user-space from creating system tables (Case-Insensitive)
     pluginSchemas.forEach(schema => {
-      if (schema.tableName.startsWith('os_')) {
+      if (schema.tableName.toLowerCase().startsWith('os_')) {
         throw new FrameworkError(
           'SECURITY_VIOLATION',
           `Critical Security Error: Developers cannot register tables starting with 'os_'. The table '${schema.tableName}' is blocked.`,
@@ -59,14 +60,19 @@ export class SchemaManagerService {
       }
     });
 
+    // Collision Detection: Strictly case-insensitive to prevent IndexedDB unexpected behaviors
     allSchemas.forEach(schema => {
-      if (combinedSchema[schema.tableName]) {
+      const normalizedName = schema.tableName.toLowerCase();
+
+      if (normalizedNames.has(normalizedName)) {
         throw new FrameworkError(
           'DB_SCHEMA_COLLISION',
-          `Critical Error: Table collision detected for '${schema.tableName}'.`,
+          `Critical Error: Table collision detected for '${schema.tableName}'. Table names must be globally unique (case-insensitive).`,
           false
         );
       }
+
+      normalizedNames.add(normalizedName);
       combinedSchema[schema.tableName] = schema.schemaDefinition;
     });
 

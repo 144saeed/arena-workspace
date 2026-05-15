@@ -15,6 +15,9 @@ export * from './lib/monitor/system-monitor.service';
 export * from './lib/monitor/ai-connection-monitor.service';
 
 // 3. Mediator & Database (Public Base Classes)
+// Note for Developers:
+// - For direct, raw table access with full Dexie capabilities, inject PublicDataStoreService.
+// - For structured, object-oriented data access patterns, extend BaseRepository<T, TKey>.
 export * from './lib/mediator/core-bus.service';
 export * from './lib/contracts/interfaces/message.interface';
 export * from './lib/contracts/interfaces/command.interface';
@@ -50,6 +53,11 @@ export * from './lib/contracts/dtos/ai-event.dto';
 export * from './lib/security/security.service';
 export * from './lib/exceptions/framework-error.exception';
 
-// 6. wiring
+// 6. Wiring
 export * from './lib/providers/arena-core.provider';
 export * from './lib/contracts/interfaces/app-identity.interface';
+
+// 7. Core System Plugins Messages (CQRS)
+export * from './lib/system-plugins/ai-profile/messages/add-ai-profile.command';
+export * from './lib/system-plugins/ai-profile/messages/delete-ai-profile.command';
+export * from './lib/system-plugins/ai-profile/messages/get-ai-profiles.query';
