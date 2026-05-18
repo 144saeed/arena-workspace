@@ -5,6 +5,7 @@ export interface SafeAiProfileDto {
     name: string;
     provider: string;
     isActive: boolean;
+    selectedModel: string;
 }
 
 export class GetAiProfilesQuery implements IQuery<SafeAiProfileDto[]> {

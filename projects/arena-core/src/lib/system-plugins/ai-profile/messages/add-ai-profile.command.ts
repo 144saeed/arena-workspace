@@ -6,6 +6,7 @@ export class AddAiProfileCommand implements ICommand {
     constructor(
         public readonly name: string,
         public readonly provider: string,
-        public readonly rawApiKey: string
+        public readonly rawApiKey: string,
+        public readonly selectedModel: string
     ) { }
 }

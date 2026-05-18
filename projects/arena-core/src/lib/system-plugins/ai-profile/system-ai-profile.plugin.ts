@@ -6,7 +6,8 @@ import { CoreBus } from '../../mediator/core-bus.service';
 import { AddAiProfileCommand } from './messages/add-ai-profile.command';
 import { DeleteAiProfileCommand } from './messages/delete-ai-profile.command';
 import { GetAiProfilesQuery } from './messages/get-ai-profiles.query';
-import { AddAiProfileHandler, DeleteAiProfileHandler, GetAiProfilesHandler } from './handlers/ai-profile-handler.service';
+import { GetProviderModelsQuery } from './messages/get-provider-models.query';
+import { AddAiProfileHandler, DeleteAiProfileHandler, GetAiProfilesHandler, GetProviderModelsHandler } from './handlers/ai-profile-handler.service';
 
 @Injectable({
     providedIn: 'root'
@@ -25,5 +26,6 @@ export class SystemAiProfilePlugin implements IAppPlugin {
         bus.registerHandler(AddAiProfileCommand, AddAiProfileHandler);
         bus.registerHandler(DeleteAiProfileCommand, DeleteAiProfileHandler);
         bus.registerHandler(GetAiProfilesQuery, GetAiProfilesHandler);
+        bus.registerHandler(GetProviderModelsQuery, GetProviderModelsHandler);
     }
 }
