@@ -31,3 +31,23 @@
 ## 8. Vault Auto-Lock (Security Enhancements)
 - **Issue:** The OS Vault currently remains unlocked indefinitely until manually locked or a page reload occurs.
 - **Action:** Implement a configurable inactivity timeout mechanism (e.g., `vaultTimeoutMs`) within `SecurityService` or `CoreEngineService` to automatically lock the vault and protect AI profiles.
+
+## 9. Developer Data Encryption Service (Plugin Security)
+- **Issue:** App plugins currently cannot easily encrypt their own highly sensitive user data without building custom cryptographic implementations.
+- **Action:** Expose a secure `DataProtectorService` to allow plugins to encrypt/decrypt strings using the master session key without compromising the OS vault.
+
+## 10. AI Task Scheduler (Proactive Agents)
+- **Issue:** The core is entirely reactive, waiting for user interactions to trigger the `CoreBus`.
+- **Action:** Implement a background scheduler (Cron-like) to execute predefined agent workflows at specific intervals.
+
+## 11. Vector Embeddings & RAG Support (Semantic Memory)
+- **Issue:** `CoreDatabaseService` lacks vector storage, and the `AiGatewayService` does not expose an embedding generation endpoint.
+- **Action:** Add an `embeddings` capability to AI adapters and introduce semantic search support in the core database engine.
+
+## 12. Multi-Agent Orchestration (Complex Workflows)
+- **Issue:** The system only supports 1-to-1 interactions (User to single AI Agent).
+- **Action:** Build an `AgentOrchestrator` to manage sequential and parallel workflows where outputs from one AI model are securely piped to another.
+
+## 13. Session Token Budget Guard (Cost Control)
+- **Issue:** There is no hard limit on token consumption during an infinite loop or runaway tool execution.
+- **Action:** Implement a token-budget middleware that forcefully aborts a session if it exceeds a predefined developer limit.
