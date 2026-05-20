@@ -1,6 +1,12 @@
-export class VaultLockedException extends Error {
+import { FrameworkError } from '../../exceptions/framework-error.exception';
+
+export class VaultLockedException extends FrameworkError {
     constructor(actionName: string) {
-        super(`[Security Guard] Access Denied. Cannot execute action '${actionName}' while the vault is locked.`);
+        super(
+            'VAULT_LOCKED',
+            `[Security Guard] Access Denied. Cannot execute action '${actionName}' while the vault is locked.`,
+            false
+        );
         this.name = 'VaultLockedException';
         Object.setPrototypeOf(this, VaultLockedException.prototype);
     }

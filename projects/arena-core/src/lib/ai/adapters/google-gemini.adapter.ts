@@ -58,6 +58,10 @@ export class GoogleGeminiAdapter implements IAiAdapter {
     );
   }
 
+  getCapabilities(): AiCapabilitiesDto {
+    return GoogleGeminiAdapter.capabilities;
+  }
+
   generateResponse(request: AiRequestDto, apiKey: string, abortSignal?: AbortSignal): Observable<AiResponseDto> {
     const endpoint = `${this.BASE_URL}/${request.model}:generateContent`;
     const payload = this.mapRequestToGeminiFormat(request);
@@ -162,7 +166,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         if (error.name !== 'AbortError') {
           subscriber.error(error);
         } else {
-          subscriber.complete(); 
+          subscriber.complete();
         }
       });
 
@@ -181,7 +185,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
   private mapRequestToGeminiFormat(request: AiRequestDto): Record<string, unknown> {
     const generationConfig: Record<string, unknown> = { temperature: request.temperature ?? 0.7 };
-    
+
     if (request.expectJson) {
       generationConfig['responseMimeType'] = 'application/json';
     }
@@ -252,7 +256,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
 
     let content = '';
     const toolCalls: AiToolCallDto[] = [];
-    
+
     parts.forEach((part: GeminiPart) => {
       if (part.text) content += part.text;
       if (part.functionCall) {
@@ -263,7 +267,7 @@ export class GoogleGeminiAdapter implements IAiAdapter {
         });
       }
     });
-    
+
     return {
       content: content.trim(),
       tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,

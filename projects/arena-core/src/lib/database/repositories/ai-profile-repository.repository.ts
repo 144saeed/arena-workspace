@@ -20,13 +20,24 @@ export class AiProfileRepository extends BaseRepository<AiProfileEntity, string>
   }
 
   async wipeAllEncryptedKeys(): Promise<void> {
-    const allProfiles = await this.getAll();
     await this.dbEngine.transaction('rw', this.table, async () => {
+      const allProfiles = await this.table.toArray();
       for (const profile of allProfiles) {
-        await this.update(profile.profileId, {
+        await this.table.update(profile.profileId, {
           encryptedApiKey: '',
           encryptionIv: ''
-        });
+        } as any);
+      }
+    });
+  }
+
+  // Encapsulating the transaction logic for atomic active profile toggling.
+  async setAsActive(profileId: string): Promise<void> {
+    await this.dbEngine.transaction('rw', this.table, async () => {
+      const allProfiles = await this.table.toArray();
+      for (const profile of allProfiles) {
+        const isActive = profile.profileId === profileId;
+        await this.table.update(profile.profileId, { isActive } as any);
       }
     });
   }

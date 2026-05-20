@@ -60,6 +60,9 @@ export * from './lib/contracts/interfaces/app-identity.interface';
 // 7. Core System Plugins Messages (CQRS)
 export * from './lib/system-plugins/ai-profile/messages/add-ai-profile.command';
 export * from './lib/system-plugins/ai-profile/messages/delete-ai-profile.command';
+export * from './lib/system-plugins/ai-profile/messages/update-ai-profile.command';
+export * from './lib/system-plugins/ai-profile/messages/set-active-profile.command';
 export * from './lib/system-plugins/ai-profile/messages/get-ai-profiles.query';
 export * from './lib/system-plugins/ai-profile/messages/get-provider-models.query';
 export * from './lib/system-plugins/ai-profile/messages/get-models-by-profile-id.query';
+export * from './lib/system-plugins/ai-profile/messages/get-active-profile-capabilities.query';
