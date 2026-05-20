@@ -12,6 +12,7 @@ import { AddAiProfileCommand } from '../messages/add-ai-profile.command';
 import { DeleteAiProfileCommand } from '../messages/delete-ai-profile.command';
 import { GetAiProfilesQuery, SafeAiProfileDto } from '../messages/get-ai-profiles.query';
 import { GetProviderModelsQuery } from '../messages/get-provider-models.query';
+import { GetModelsByProfileIdQuery } from '../messages/get-models-by-profile-id.query';
 
 @Injectable({ providedIn: 'root' })
 export class AddAiProfileHandler implements IMessageHandler<AddAiProfileCommand, string> {
@@ -21,7 +22,6 @@ export class AddAiProfileHandler implements IMessageHandler<AddAiProfileCommand,
   private readonly aiRegistry = inject(AiRegistryService);
 
   async handle(message: AddAiProfileCommand): Promise<string> {
-    // Strict live validation before any cryptographic operation
     const adapter = this.aiRegistry.createAdapterInstance(message.provider);
     const isValid = await firstValueFrom(adapter.validateKey(message.rawApiKey));
 
@@ -82,16 +82,46 @@ export class GetProviderModelsHandler implements IMessageHandler<GetProviderMode
     const adapter = this.aiRegistry.createAdapterInstance(message.providerId);
 
     try {
-      // Fetching models inherently validates the API key. 
-      // A single network request prevents redundant latency.
       const models = await firstValueFrom(adapter.fetchModels(message.rawApiKey));
       return models;
     } catch (error) {
-      // Preserve specific framework errors (like AI_NETWORK_ERROR for offline status)
       if (error instanceof FrameworkError) {
         throw error;
       }
       throw new FrameworkError('INVALID_API_KEY', 'The provided API key is invalid or lacks sufficient permissions.', false, error);
+    }
+  }
+}
+
+@Injectable({ providedIn: 'root' })
+export class GetModelsByProfileIdHandler implements IMessageHandler<GetModelsByProfileIdQuery, string[]> {
+  private readonly aiProfileRepo = inject(AiProfileRepository);
+  private readonly cryptoService = inject(CryptoService);
+  private readonly securityService = inject(SecurityService);
+  private readonly aiRegistry = inject(AiRegistryService);
+
+  async handle(message: GetModelsByProfileIdQuery): Promise<string[]> {
+    // 1. Retrieve the profile securely
+    const profile = await this.aiProfileRepo.getById(message.profileId);
+    if (!profile) {
+      throw new FrameworkError('PROFILE_NOT_FOUND', `AI Profile with ID '${message.profileId}' not found.`, false);
+    }
+
+    // 2. Unlock and decrypt the API key
+    const masterKey = this.securityService.getSessionKey();
+    const decryptedKey = await this.cryptoService.decrypt(profile.encryptedApiKey, profile.encryptionIv, masterKey);
+
+    // 3. Resolve the adapter and fetch models using the decrypted key
+    const adapter = this.aiRegistry.createAdapterInstance(profile.providerId);
+
+    try {
+      const models = await firstValueFrom(adapter.fetchModels(decryptedKey));
+      return models;
+    } catch (error) {
+      if (error instanceof FrameworkError) {
+        throw error;
+      }
+      throw new FrameworkError('INVALID_API_KEY', 'The stored API key is invalid or lacks sufficient permissions.', false, error);
     }
   }
 }

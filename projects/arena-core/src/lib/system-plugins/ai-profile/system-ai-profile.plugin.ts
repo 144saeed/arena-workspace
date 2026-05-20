@@ -7,7 +7,8 @@ import { AddAiProfileCommand } from './messages/add-ai-profile.command';
 import { DeleteAiProfileCommand } from './messages/delete-ai-profile.command';
 import { GetAiProfilesQuery } from './messages/get-ai-profiles.query';
 import { GetProviderModelsQuery } from './messages/get-provider-models.query';
-import { AddAiProfileHandler, DeleteAiProfileHandler, GetAiProfilesHandler, GetProviderModelsHandler } from './handlers/ai-profile-handler.service';
+import { GetModelsByProfileIdQuery } from './messages/get-models-by-profile-id.query';
+import { AddAiProfileHandler, DeleteAiProfileHandler, GetAiProfilesHandler, GetProviderModelsHandler, GetModelsByProfileIdHandler } from './handlers/ai-profile-handler.service';
 
 @Injectable({
     providedIn: 'root'
@@ -18,7 +19,6 @@ export class SystemAiProfilePlugin implements IAppPlugin {
     public readonly version = '1.0.0';
 
     public get requiredDbSchemas(): IDbSchema[] {
-        // os_ai_profiles is natively managed by OS_MANDATORY_SCHEMAS
         return [];
     }
 
@@ -27,5 +27,6 @@ export class SystemAiProfilePlugin implements IAppPlugin {
         bus.registerHandler(DeleteAiProfileCommand, DeleteAiProfileHandler);
         bus.registerHandler(GetAiProfilesQuery, GetAiProfilesHandler);
         bus.registerHandler(GetProviderModelsQuery, GetProviderModelsHandler);
+        bus.registerHandler(GetModelsByProfileIdQuery, GetModelsByProfileIdHandler);
     }
 }

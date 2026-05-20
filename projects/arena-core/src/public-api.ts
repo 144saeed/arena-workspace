@@ -62,3 +62,4 @@ export * from './lib/system-plugins/ai-profile/messages/add-ai-profile.command';
 export * from './lib/system-plugins/ai-profile/messages/delete-ai-profile.command';
 export * from './lib/system-plugins/ai-profile/messages/get-ai-profiles.query';
 export * from './lib/system-plugins/ai-profile/messages/get-provider-models.query';
+export * from './lib/system-plugins/ai-profile/messages/get-models-by-profile-id.query';
