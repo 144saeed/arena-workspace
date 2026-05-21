@@ -51,3 +51,6 @@
 ## 13. Session Token Budget Guard (Cost Control)
 - **Issue:** There is no hard limit on token consumption during an infinite loop or runaway tool execution.
 - **Action:** Implement a token-budget middleware that forcefully aborts a session if it exceeds a predefined developer limit.
+
+## 14. **Refactor Framework Error Codes:** - **Issue:** Error codes like `'VAULT_LOCKED'` and `'AI_AUTH_FAILED'` are currently hardcoded string literals scattered across the core services and exceptions.
+    - **Action:** Create a centralized `FrameworkErrorCode` enum or const object (e.g., `export const FrameworkErrorCode = { VAULT_LOCKED: 'VAULT_LOCKED', ... } as const;`) to provide strict type-safety for both the core and consumer UI platforms.
