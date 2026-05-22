@@ -58,21 +58,31 @@ These are app-wide singleton services that enforce consistency across all featur
 - **Feedback Pipeline:** Centralizes Toasts, Snackbars, and system alerts.
 - **Theme Manager:** Controls dark/light modes and CSS variable injections.
 
-### 2.5. Tight Coupling Red Lines (Anti-Injection Matrix)
-To prevent circular dependencies, the following injection matrix is strictly enforced:
+### 2.5. Tight Coupling Red Lines (Anti-Injection Matrix & Authorized Exceptions)
+To prevent circular dependencies and architectural erosion, the following injection matrix is strictly enforced.
 
+#### 2.5.1. Standard Injection Flow
 ~~~text
 [ALLOWED INJECTIONS]
-- Organism Components MAY inject Layer 2 & Layer 3.
-- Layer 3 (Orchestrator) MAY inject Layer 2 (App State) & Global Infrastructure.
+- Organism Components MAY inject Layer 2 (App State) & Layer 3 (Ui Orchestrator).
+- Layer 3 (Orchestrator) MAY inject Layer 2 (App State) & Global Infrastructure Services.
 - Layer 2 (App State) MAY inject Layer 1 (Bridge).
 - Layer 1 (Bridge) MAY inject CoreBus.
 
 [STRICTLY PROHIBITED]
-- Components MUST NOT inject Layer 1.
-- Layer 1 MUST NOT inject Layer 2 or Layer 3.
-- Layer 2 MUST NOT inject Layer 3 or Global Infrastructure.
+- Components MUST NOT inject Layer 1 Services directly.
+- Layer 1 Services MUST NOT inject Layer 2 or Layer 3 Services.
+- Layer 2 Services MUST NOT inject Layer 3 or Global Infrastructure Services.
 ~~~
+#### 2.5.2. Authorized Direct Core Injections (Explicit Exceptions)
+
+While Layer 1 (Bridge) services primarily communicate via the `CoreBus`, they are granted explicit, narrow permission to bypass the command/query bus and inject exactly two critical framework-level services directly:
+
+- **`AiGatewayService`:** Authorized strictly for subscribing to live, asynchronous AI token streams. Direct extraction of `GoogleGeminiAdapter.providerId` configuration is permitted here.
+    
+- **`SecurityService`:** Authorized strictly for reading the `isVaultUnlocked` synchronous signal to enable immediate UI reactions to memory-locking states.
+    
+- _Constraint:_ Injecting any other internal core registry, service, or database layer remains completely prohibited.
 
 ## 3. The Enterprise Feature Pattern
 
@@ -173,9 +183,9 @@ Because the UI operates within the browser's memory space alongside the Local Se
 
 ### 6.1. Vault Lock Response Protocol
 The UI must be structurally prepared for the Core to lock the cryptographic vault at any moment (e.g., due to an idle timeout).
-- **Global Listener:** The UI shell must maintain a persistent listener for the `VAULT_LOCKED` system event emitted by the CoreBus.
-- **Immediate Purge:** Upon receiving this event, the UI must instantly execute a global state purge. All Layer 2 App State Services containing decrypted projections must reset their Signals to empty/null states.
-- **Redirection:** The UI Orchestrator must immediately forcefully navigate the user to the Unlock/Onboarding screen, bypassing any standard routing guards.
+- **Reactive Signal Tracking:** The UI shell and core layout layout must reactively monitor the `SecurityService.isVaultUnlocked` read-only signal. Developers MUST NOT listen for a `VAULT_LOCKED` event on the CoreBus, as lock states are maintained exclusively via synchronous framework signals.
+- **Immediate Purge:** As soon as the `isVaultUnlocked()` signal evaluates to `false`, a global state purge must be automatically executed via an Angular effect. All Layer 2 App State Services containing decrypted projections must reset their local Signals to empty or null states instantly.
+- **Redirection:** The Layer 3 UI Orchestrator must immediately intercept this specific state change to forcefully navigate the user to the Unlock/Onboarding screen, safely bypassing any standard presentation routing guards.
 
 ### 6.2. Memory Hygiene & Component Destruction
 Garbage collection in a long-running SPA is critical, especially when handling sensitive AI outputs or decrypted strings.
@@ -194,9 +204,10 @@ AI models frequently output Markdown containing code blocks, HTML tags, and pote
 A robust enterprise UI does not crash or display a "White Screen of Death" when the backend engine fails. It degrades gracefully and orchestrates recovery.
 
 ### 7.1. Framework Error Codes Mapping
-The `arena-core` will emit standardized, predictable error codes (e.g., `CORE_ERR_VAULT_LOCKED`, `CORE_ERR_DB_QUOTA_EXCEEDED`). 
-- **The UI Dictionary:** The UI layer must maintain a mapping of these system codes to user-friendly visual orchestrations.
-- **Actionable Feedback:** Instead of displaying raw backend stack traces, Layer 3 (Ui Orchestrator) must intercept these codes and trigger specific infrastructure overlays (e.g., "Your browser storage is full. Please clear some space.") accompanied by actionable buttons.
+The `arena-core` framework emits standardized, predictable string literals as error codes (e.g., `VAULT_LOCKED`, `AI_AUTH_FAILED`, `AI_NETWORK_ERROR`, `SECURITY_VIOLATION`). Note that there are no `CORE_ERR_` prefixes attached to framework exceptions.
+- **The UI Dictionary:** The UI layer must maintain an infrastructure mapping dictionary that translates these raw string error codes directly into user-friendly visual orchestrations and localized text.
+- **Actionable Feedback:** Instead of displaying raw backend stack traces to the end user, Layer 3 (UI Orchestrator) must intercept these precise error strings and trigger specific infrastructure overlays accompanied by clear recovery options.
+- **Future Roadmap Warning:** Note that while error codes in v1 are string literals, they are scheduled to be refactored into a centralized, type-safe `FrameworkErrorCode` enum/const object in v2. All documented UI integrations should anticipate this structural upgrade.
 
 ### 7.2. Core Fallback Strategies
 In extreme cases (e.g., IndexedDB corruption or complete Core boot failure), the UI must not hang on a loading spinner indefinitely.

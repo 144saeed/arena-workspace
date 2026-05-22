@@ -34,24 +34,21 @@ export const APP_ROUTES: Routes = [
 ---
 
 ## 4. Feature Inventory (The Epics)
-
-List all the major independent features (epics) this application requires. Each feature listed here MUST eventually have its own Feature LLD document.
+List all the major independent features (epics) this application requires. Each feature listed here MUST eventually have its own Feature LLD document mapped by a strict naming convention.
 
 ### 4.1. Feature: [Feature Name, e.g., Vault Management]
-
-* **Responsibility:** [e.g., Handles setup, unlocking, and locking of the master vault.]
-* **Key Organisms Needed:** [e.g., `Org-VaultSetupModal`, `Org-VaultUnlockModal`]
-* **Core Dependencies (WHAT):** [e.g., Relies on `GetVaultStatusQuery`, `UnlockVaultCommand`]
+- **LLD File Link:** `docs/features/feature-vault-management.md` *(MUST follow `feature-[kebab-case].md` format)*
+- **Responsibility:** [e.g., Handles setup, unlocking, and locking of the master vault.]
+- **Key Organisms Needed:** [e.g., `Org-VaultSetupModal`, `Org-VaultUnlockModal`]
+- **Core Dependencies (WHAT):** [e.g., Relies on `GetVaultStatusQuery`, `UnlockVaultCommand`]
 
 ### 4.2. Feature: [Feature Name, e.g., AI Chat Engine]
-
-* **Responsibility:** [e.g., Manages user prompts, AI message bubbling, and token stream parsing.]
-* **Key Organisms Needed:** [e.g., `Org-ChatWindow`, `Org-MessageList`]
-* **Core Dependencies (WHAT):** [e.g., Relies on `AiGatewayService` stream]
+- **LLD File Link:** `docs/features/feature-ai-chat-engine.md`
+- **Responsibility:** [e.g., Manages user prompts, AI message bubbling, and token stream parsing.]
+- **Key Organisms Needed:** [e.g., `Org-ChatWindow`, `Org-MessageList`]
+- **Core Dependencies (WHAT):** [e.g., Relies on `AiGatewayService` stream]
 
 ---
 
 ## 5. Next Steps
-
-Once this blueprint is approved, the team will create individual Feature LLD documents (e.g., `feature-vault-management.md`) based on the Feature Inventory above.
-
+Once this blueprint is approved, the development team will create individual Feature LLD documents inside the application's `docs/features/` directory. The filenames MUST exactly match the **LLD File Link** declarations specified in Section 4 above.

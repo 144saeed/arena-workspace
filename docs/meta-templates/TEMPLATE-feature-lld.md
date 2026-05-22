@@ -9,33 +9,33 @@
 ## 2. Service Architecture (The 3 Layers)
 Define the exact services that will be created or modified for this feature.
 
+### 2.0. Core Extension Requirement (Plugin Check)
+- [ ] **No Plugin Required:** This feature strictly uses existing commands/queries documented in `api-reference.md`.
+- [ ] **Plugin Required:** This feature requires new Core backend capabilities. A new `IAppPlugin` must be created in `features/[name]/plugins/` to register new handlers and/or database schemas.
+
 ### 2.1. Layer 1: Core Bridge Service
 - **Service Name:** `[FeatureName]CoreBridgeService`
 - **Injected Core Dependencies:** [e.g., `CoreBus`, `AiGatewayService`]
 - **Commands/Queries Dispatched:**
-  - `[Command/Query Name]`: [Briefly what it does]
+  - `[Command/Query Name]`: [Briefly describe what it does. Specify if it is a pre-existing core message or a new one provided by this feature's plugin.]
 
 ### 2.2. Layer 2: Application State Service
 - **Service Name:** `[FeatureName]AppStateService`
 - **State Properties (Signals):**
-  ~~~typescript
-    // List the exact signals that will be maintained
-    readonly isProcessing = signal<boolean>(false);
-    readonly featureData = signal<ReadonlyArray<SafeDataDto>>([]);
-  ~~~
-
-* **Computed Properties:**
-    ~~~typescript
-    readonly activeItem = computed(() => /* logic */);
-    ~~~
-
-
+  ```typescript
+  // List the exact signals that will be maintained
+  readonly isProcessing = signal<boolean>(false);
+  readonly featureData = signal<ReadonlyArray<SafeDataDto>>([]);
+  ```
+- **Computed Properties:**
+  ```typescript
+  readonly activeItem = computed(() => /* logic */);
+  ```
 
 ### 2.3. Layer 3: UI Orchestrator Service
-
-* **Service Name:** `[FeatureName]UiOrchestratorService`
-* **Listens To:** [e.g., Component Emitters, App State Signal changes]
-* **Visual Actions Triggered:** [e.g., Calls `OverlayManagerService.open(ModalComponent)`]
+- **Service Name:** `[FeatureName]UiOrchestratorService`
+- **Listens To:** [e.g., Component Emitters, App State Signal changes]
+- **Visual Actions Triggered:** [e.g., Calls `OverlayManagerService.open(ModalComponent)`]
 
 ---
 
