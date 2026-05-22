@@ -44,3 +44,6 @@ __screenshots__/
 Thumbs.db
 codes.txt
 
+# Old files
+/projects/__*old
+
