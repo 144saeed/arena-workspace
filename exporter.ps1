@@ -16,7 +16,7 @@ Get-ChildItem -Path $rootPath -Recurse -Include $extensions |
         # حذف فایل‌های تست
         $_.Name -notlike "*.spec.ts" -and 
         # حذف پوشه‌های سیستمی و غیرضروری (RegEx)
-        $_.FullName -notmatch "\\node_modules\\|\\.git\\|\\.angular\\|\\dist\\|\\\.vscode\\"
+        $_.FullName -notmatch "\\node_modules\\|\\.git\\|\\.angular\\|\\dist\\|\\\.vscode\\|\\__arena-playground-old\\"
     } | 
     ForEach-Object { 
         $path = $_.FullName
