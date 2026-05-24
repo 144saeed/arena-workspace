@@ -1,336 +1,442 @@
 # Arena Core API Reference
 
-This document serves as the absolute source of truth for the capabilities, commands, queries, and data structures exposed by the `arena-core` local server. 
+---
 
-## 1. Core Commands (State Mutations)
-Commands are dispatched via the `CoreBus` to mutate the state of the local system (e.g., database writes, configuration changes). They execute within transaction boundaries.
+## 1. Core Commands (ICommand)
 
-> [!warning]
-> Error codes in v1 are string literals. They are scheduled to be refactored into a centralized FrameworkErrorCode enum/const object in v2.
+Commands represent intent to change the state of the Local Backend Server. All commands are dispatched via the `CoreBus` and process synchronously or asynchronously depending on the domain scope.
 
-### 1.1. AddAiProfileCommand
-* **Description:** Registers a new AI profile and securely encrypts the provided raw API key before storing it in the local vault.
+> [!warning] Error Codes Literal Warning
+> Note: Error codes in v1 are string literals. They are scheduled to be refactored into a centralized FrameworkErrorCode enum/const object in v2.
+
+### 1.1 AddAiProfileCommand
+Registers a new AI provider profile configuration into the local storage ecosystem.
 * **Payload Structure:**
 ~~~typescript
-export class AddAiProfileCommand implements ICommand {
-    constructor(
-        public readonly name: string,
-        public readonly provider: string,
-        public readonly rawApiKey: string,
-        public readonly selectedModel: string
-    ) {}
+class AddAiProfileCommand implements ICommand {
+  constructor(
+    public readonly name: string,
+    public readonly provider: 'google' | 'openai' | 'anthropic',
+    public readonly apiKey: string,
+    public readonly config: Record<string, any>
+  ) {}
 }
 ~~~
-* **Expected Outcome:** A new encrypted `AiProfileEntity` is stored in the database. Returns the generated profile UUID string.
-* **Throws:** `INVALID_API_KEY`, `VAULT_LOCKED`
+* **Security & Constraints:** Requires an unlocked vault state.
+* **Potential Error Codes:** * `VAULT_LOCKED`
+  * `INVALID_API_KEY`
+  * `DUPLICATE_PROFILE_NAME`
 
-### 1.2. DeleteAiProfileCommand
-* **Description:** Permanently removes an existing AI profile from the local database ecosystem.
+### 1.2 UpdateAiProfileCommand
+Modifies an existing AI provider profile configuration.
 * **Payload Structure:**
 ~~~typescript
-export class DeleteAiProfileCommand implements ICommand {
-    constructor(public readonly id: string) {}
+class UpdateAiProfileCommand implements ICommand {
+  constructor(
+    public readonly id: string,
+    public readonly updates: {
+      readonly name?: string;
+      readonly apiKey?: string;
+      readonly config?: Record<string, any>;
+    }
+  ) {}
 }
 ~~~
-* **Expected Outcome:** The specified profile is deleted from the `os_ai_profiles` system schema.
-* **Throws:** `VAULT_LOCKED`
+* **Security & Constraints:** Requires an unlocked vault state.
+* **Potential Error Codes:** * `VAULT_LOCKED`
+  * `AI_PROFILE_NOT_FOUND`
+  * `INVALID_API_KEY`
 
-### 1.3. UpdateAiProfileCommand
-* **Description:** Updates the properties of an existing AI profile. If a new raw API key is provided, it is dynamically re-validated and re-encrypted.
+### 1.3 SetActiveProfileCommand
+Sets a specific AI profile as the globally active provider for immediate dispatch and agentic execution.
 * **Payload Structure:**
 ~~~typescript
-export class UpdateAiProfileCommand implements ICommand {
-    constructor(
-        public readonly id: string,
-        public readonly name?: string,
-        public readonly selectedModel?: string,
-        public readonly rawApiKey?: string
-    ) {}
+class SetActiveProfileCommand implements ICommand {
+  constructor(
+    public readonly id: string
+  ) {}
 }
 ~~~
-* **Expected Outcome:** The targeted AI profile is updated with the new values.
-* **Throws:** `PROFILE_NOT_FOUND`, `INVALID_API_KEY`, `VAULT_LOCKED`
+* **Security & Constraints:** Requires an unlocked vault state.
+* **Potential Error Codes:** * `VAULT_LOCKED`
+  * `AI_PROFILE_NOT_FOUND`
 
-### 1.4. SetActiveProfileCommand
-* **Description:** Sets a specific AI profile as the global default context for the application instance.
+### 1.4 DeleteAiProfileCommand
+Permanently deletes an AI profile configuration from the local backend store.
 * **Payload Structure:**
 ~~~typescript
-export class SetActiveProfileCommand implements ICommand {
-    constructor(public readonly id: string) {}
+class DeleteAiProfileCommand implements ICommand {
+  constructor(
+    public readonly id: string
+  ) {}
 }
 ~~~
-* **Expected Outcome:** The `isActive` flag for the designated profile becomes `true`, and all others are toggled to `false` within an ACID transaction.
-* **Throws:** `PROFILE_NOT_FOUND`, `VAULT_LOCKED`
+* **Security & Constraints:** Requires an unlocked vault state.
+* **Potential Error Codes:** * `VAULT_LOCKED`
+  * `AI_PROFILE_NOT_FOUND`
 
 ---
 
-## 2. Core Queries (Data Retrieval)
+## 2. Core Queries (IQuery)
 
-Queries are dispatched via the `CoreBus` to retrieve data safely. They are strictly read-only and guarantee no state mutation.
+Queries are read-only operations executed against the local backend server state. They return highly typed data promises.
 
-### 2.1. GetAiProfilesQuery
-* **Description:** Retrieves a safe list of all registered AI profiles without exposing decrypted API keys to the UI.
-* **Payload Structure:** *(No arguments required)*
-~~~typescript
-export class GetAiProfilesQuery implements IQuery<SafeAiProfileDto[]> {}
-~~~
-* **Returns:** `Promise<SafeAiProfileDto[]>`
-* **Security Constraint:** Does not expose raw keys. Requires unlocked vault for execution context mapping.
+### 2.1 GetAiProfilesQuery
+Retrieves an array of all configured AI profiles available to the dumb client UI.
+* **Payload Structure:** Empty constructor.
+* **Return Type:** `Promise<SafeAiProfileDto[]>`
+* **Security & Constraints:** Requires an unlocked vault. If locked, rejects immediately.
+* **Potential Error Codes:** `VAULT_LOCKED`
 
-### 2.2. GetProviderModelsQuery
-* **Description:** Fetches available models directly from the remote AI provider using an unencrypted, transient API key.
-* **Payload Structure:**
-~~~typescript
-export class GetProviderModelsQuery implements IQuery<string[]> {
-    constructor(
-        public readonly providerId: string,
-        public readonly rawApiKey: string
-    ) {}
-}
-~~~
-* **Returns:** `Promise<string[]>`
-* **Security Constraint:** Bypasses local vault decryption; relies entirely on the provided transient key passing through the UI.
-
-### 2.3. GetModelsByProfileIdQuery
-* **Description:** Retrieves available models for an existing profile by internally decrypting its stored API key via the OS Vault.
-* **Payload Structure:**
-~~~typescript
-export class GetModelsByProfileIdQuery implements IQuery<string[]> {
-    constructor(public readonly profileId: string) {}
-}
-~~~
-* **Returns:** `Promise<string[]>`
-* **Security Constraint:** Strictly requires an unlocked vault to retrieve and use the master session key for underlying AES-GCM decryption.
-
-### 2.4. GetActiveProfileCapabilitiesQuery
-* **Description:** Retrieves the structural capabilities (e.g., streaming support, vision, tool usage) of the currently active AI adapter context.
-* **Payload Structure:** *(No arguments required)*
-~~~typescript
-export class GetActiveProfileCapabilitiesQuery implements IQuery<AiCapabilitiesDto | undefined> {}
-~~~
-* **Returns:** `Promise<AiCapabilitiesDto | undefined>`
-* **Security Constraint:** Safe read-only check mapping directly to static adapter capabilities.
+### 2.2 GetActiveProfileQuery
+Retrieves the currently selected and active AI profile metadata.
+* **Payload Structure:** Empty constructor.
+* **Return Type:** `Promise<SafeAiProfileDto | null>`
+* **Security & Constraints:** Requires an unlocked vault.
+* **Potential Error Codes:** `VAULT_LOCKED`
 
 ---
+
 ## 3. Data Transfer Objects (DTOs)
 
-The following data structures define the contracts for data passing between the UI layer (dumb client) and the Core server.
+All data structures passing across the process boundary between the UI client and the Core server are strictly immutable, matching the Signal-First paradigm of the frontend layer.
 
-### 3.1 System DTOs
-
-**SafeAiProfileDto**
-Represents the sanitized profile data for an AI agent. 
-*Note: As per the current v1 implementation, this interface does not enforce strict runtime immutability.*
-```typescript
+### 3.1 SafeAiProfileDto
+Exposes AI profile metadata without leaking sensitive credentials like API keys.
+~~~typescript
 export interface SafeAiProfileDto {
-    id: string;
-    name: string;
-    provider: string;
-    isActive: boolean;
-    selectedModel: string;
-}
-````
-
-**AiEventDto** Represents a strictly typed stream event emitted from the AI gateway.
-
-TypeScript
-
-```
-export interface AiEventDto {
-    readonly eventId: string;
-    readonly type: 'chunk' | 'tool_call' | 'done' | 'error';
-    readonly payload: any;
-    readonly timestamp: number;
-}
-```
-
-## 4. Core Command Bus (CQRS Engine)
-
-The `CoreBus` is the central nervous system of the framework, strictly routing all commands and queries from the UI to their respective internal handlers.
-
-### 4.1 Bus Methods
-
-**dispatch**
-
-TypeScript
-
-```
-dispatch<T>(message: ICommand<T> | IQuery<T>): Promise<T>
-```
-
-Executes a command or query by resolving and invoking its registered handler.
-
-- **Throws:** `HANDLER_NOT_FOUND` if no matching handler is registered in the system.
-    
-
-**useMiddleware**
-
-TypeScript
-
-```
-useMiddleware(middleware: IBusMiddleware): void
-```
-
-Registers a middleware interceptor into the execution pipeline.
-
-> [!warning] for UI Consumers:
-> This method is strictly reserved for internal core orchestration. In the official Playbook, `useMiddleware` is exclusively invoked by the `CoreEngineService` during the boot sequence. UI developers **must not** call this method under any circumstances, as it may permanently destabilize the CQRS pipeline.
-
----
-
-## 5. System Plugins & Tools
-
-The core exposes a strict registry for injecting dynamic AI tools into the context.
-
-### 5.1 Tool Execution Types
-
-To develop a custom tool, consumers must implement the `ToolHandler` signature and utilize the `IToolExecutionContext`.
-
-**ToolHandler**
-The asynchronous function signature required to execute a registered tool.
-```typescript
-type ToolHandler = (
-    args: Record<string, any>, 
-    context: IToolExecutionContext
-) => Promise<StructuredToolResultDto>;
-```
-
-**IToolExecutionContext** Provides isolated dependencies and cancellation tokens to the executing tool.
-
-TypeScript
-
-```
-interface IToolExecutionContext {
-    readonly injector: Injector;
-    readonly abortSignal?: AbortSignal;
-}
-```
-
-## 6. Security & Vault Constraints
-
-The Core enforces a strictly local encryption paradigm. All sensitive AI profiles and keys are stored in an encrypted vault.
-
-> [!note]
->  Error codes in v1 are string literals. They are scheduled to be refactored into a centralized FrameworkErrorCode enum/const object in v2.
-
-### 6.1 Security Methods
-
-**setupVault**
-
-TypeScript
-
-```
-setupVault(password: string): Promise<void>
-```
-
-Initializes a new vault with the provided master password.
-
-- **Throws:** - `VAULT_EXISTS`: If a vault is already initialized on the device.
-    
-    - `WEAK_PASSWORD`: If the provided password does not meet system entropy requirements.
-        
-    - `NOT_BOOTED`: If the core engine has not completed its initialization sequence.
-        
-
-**unlockVault**
-
-TypeScript
-
-```
-unlockVault(password: string): Promise<void>
-```
-
-Decrypts the local vault into memory for the duration of the current session.
-
-- **Throws:** - `VAULT_MISSING`: If no vault has been created on the device.
----
-
-## 7. Core Storage & Portability
-
-The framework exposes strict APIs for ecosystem state management, data persistence, and portability. 
-
-### 7.2 Connection States
-
-**ProfileConnectionState**
-Represents the real-time connectivity status of an AI profile. UI consumers requiring iteration over profile maps must utilize this type.
-~~~typescript
-export interface ProfileConnectionState {
-    readonly status: 'connected' | 'disconnected' | 'error';
-    readonly lastChecked: Date;
+  readonly id: string;
+  readonly name: string;
+  readonly provider: 'google' | 'openai' | 'anthropic';
+  readonly config: Record<string, any>;
+  readonly createdAt: string;
 }
 ~~~
 
-### 7.3 System Portability
-
-**importEcosystem**
+### 3.2 AiRequestDto
+The universal payload structure delivered to dispatchers and agentic loop executors.
 ~~~typescript
-importEcosystem(payload: any): Promise<void>
+export interface AiRequestDto {
+  readonly messages: readonly AiMessageDto[];
+  readonly systemInstruction?: string;
+  readonly tools?: readonly AiToolDto[];
+  readonly temperature?: number;
+  readonly maxOutputTokens?: number;
+}
 ~~~
-Parses and injects a complete ecosystem backup into the local encrypted storage.
-- **Throws:** - `IMPORT_PARSE_ERROR`: If the payload structure is invalid or corrupt.
-  - `IMPORT_DOS_RISK`: If the payload exceeds the hard limit.
-- **Warning for Consumers:** To prevent browser memory exhaustion, the payload size is strictly capped at **50,000 records**.
 
-**factoryReset**
+### 3.3 AiResponseDto
+The absolute final response state emitted upon completion of a non-streaming AI process.
 ~~~typescript
-factoryReset(): Promise<void>
+export interface AiResponseDto {
+  readonly message: AiMessageDto;
+  readonly usage: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  };
+  readonly terminationReason: 'stop' | 'length' | 'tool_calls' | 'content_filter';
+}
 ~~~
-Executes a highly destructive operation that permanently wipes the entire local IndexedDB and invalidates the active vault.
-- **Throws:** `FACTORY_RESET_FAILED`
-- **Side-Effect Warning:** Upon a successful wipe, this method forcefully triggers a `window.location.reload()` to purge all in-memory states. Consumers must prepare for an immediate ungraceful exit.
 
-### 7.4 Data Storage & Repositories
+### 3.4 AiMessageDto
+Represents a structured conversational historical unit or model turn.
+~~~typescript
+export interface AiMessageDto {
+  readonly role: 'user' | 'model' | 'system' | 'tool';
+  readonly parts: readonly AiMessagePartDto[];
+}
+~~~
 
-Essential infrastructure services exposed for enterprise plugin developers.
+### 3.5 AiMessagePartDto
+Defines a multimodal or polymorphic unit within a message context.
+~~~typescript
+export interface AiMessagePartDto {
+  readonly text?: string;
+  readonly toolCall?: AiToolCallDto;
+  readonly toolResult?: StructuredToolResultDto;
+}
+~~~
+
+### 3.6 AiToolDto
+The schema contract passed to the AI adapter specifying an executable application tool capability.
+~~~typescript
+export interface AiToolDto {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Record<string, any>; // JSON Schema object
+}
+~~~
+
+### 3.7 AiToolCallDto
+An invitation from the model layer to execute a local framework capability.
+~~~typescript
+export interface AiToolCallDto {
+  readonly id: string;
+  readonly name: string;
+  readonly args: Record<string, any>;
+}
+~~~
+
+### 3.8 StructuredToolResultDto
+The return payload containing the localized operational output of an executed tool.
+~~~typescript
+export interface StructuredToolResultDto {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly result: any;
+  readonly isError: boolean;
+}
+~~~
+
+### 3.9 AiCapabilitiesDto
+A capability matrix declaring what features the active backend adapter safely supports.
+~~~typescript
+export interface AiCapabilitiesDto {
+  readonly supportsStreaming: boolean;
+  readonly supportsTools: boolean;
+  readonly supportsSystemInstruction: boolean;
+  readonly maxContextWindow: number;
+}
+~~~
 
 
-**PublicDataStoreService**
-Provides sanitized, raw access to the underlying storage engine (IndexedDB wrappers) for custom table management.
- 
- 
-**BaseRepository< T >**
-The abstract repository class enforcing generic CRUD operations (Create, Read, Update, Delete) strictly aligned with the framework's Signal-First and local-only architecture.
+## 4. System Events & Live Streams
+
+The AI Engine heavily utilizes reactive streams (RxJS Observables) to emit live token generation events, tool execution statuses, and connection monitors.
+
+### 4.1 AiGatewayService
+The primary entry point for dispatching standard AI requests. It handles routing to the active profile's adapter and managing the lifecycle of the request.
+
+~~~typescript
+class AiGatewayService {
+  /**
+   * Dispatches a single-turn request and waits for the complete response.
+   */
+  public dispatch(
+    request: AiRequestDto,
+    profileId?: string,
+    abortSignal?: AbortSignal
+  ): Observable<AiResponseDto>;
+
+  /**
+   * Dispatches a request and returns a stream of real-time events (tokens, tool calls).
+   */
+  public dispatchStream(
+    request: AiRequestDto,
+    profileId?: string,
+    abortSignal?: AbortSignal
+  ): Observable<AiEventDto>;
+
+  /**
+   * Pings a specific AI profile to verify connection and key validity.
+   */
+  public pingProfile(profileId: string): Observable<boolean>;
+}
+~~~
+* **Execution Notes:** If `profileId` is omitted, the framework automatically defaults to the globally active profile. The `abortSignal` parameter is critical; it allows the dumb client UI to natively cancel ongoing HTTP requests or streams at the lowest adapter level.
+
+### 4.2 AgentExecutorService
+Manages the autonomous agentic loop. It evaluates tool calls from the model, executes them via the local `AiToolRegistryService`, and iteratively feeds the localized results back to the model until a final answer is reached or the safety iteration limit is hit.
+
+~~~typescript
+class AgentExecutorService {
+  /**
+   * Executes an autonomous task and resolves only when the agent completes its loop.
+   */
+  public executeTask(
+    request: AiRequestDto,
+    profileId?: string,
+    maxIterations?: number,
+    abortSignal?: AbortSignal
+  ): Promise<AiResponseDto>;
+
+  /**
+   * Executes an autonomous task and streams all intermediate thoughts, tool calls, tool results, and final outputs.
+   */
+  public executeStreamTask(
+    request: AiRequestDto,
+    profileId?: string,
+    maxIterations?: number,
+    abortSignal?: AbortSignal
+  ): Observable<AiEventDto>;
+}
+~~~
+* **Execution Notes:** The `maxIterations` parameter is a safety mechanism to prevent infinite LLM hallucination loops (usually defaults to 5). Triggering the `abortSignal` will immediately halt the agentic loop, cancel any pending tool executions, and abort active adapter requests.
+
+~~~typescript
+class AgentExecutorService {
+  /**
+   * Executes an autonomous task and resolves only when the agent completes its loop.
+   */
+  public executeTask(
+    request: AiRequestDto,
+    profileId?: string,
+    maxIterations?: number,
+    abortSignal?: AbortSignal
+  ): Promise<AiResponseDto>;
+
+  /**
+   * Executes an autonomous task and streams all intermediate thoughts, tool calls, tool results, and final outputs.
+   */
+  public executeStreamTask(
+    request: AiRequestDto,
+    profileId?: string,
+    maxIterations?: number,
+    abortSignal?: AbortSignal
+  ): Observable<AiEventDto>;
+}
+~~~
+* **Execution Notes:** The `maxIterations` parameter is a safety mechanism to prevent infinite LLM hallucination loops (usually defaults to 5). Triggering the `abortSignal` will immediately halt the agentic loop, cancel any pending tool executions, and abort active adapter requests.
 
 ---
 
-## 8. Registered Plugins & System Adapters
+## 5. Core Command Bus (CQRS)
 
-### 8.1. SystemAiProfilePlugin
-* **App ID:** `system-ai-profile`
-* **Description:** The core plugin injected during the boot sequence. It handles dynamic configuration of API keys and AI models.
-* **Registered Handlers (CQRS):**
-  * `AddAiProfileCommand`
-  * `UpdateAiProfileCommand`
-  * `DeleteAiProfileCommand`
-  * `SetActiveProfileCommand`
-  * `GetAiProfilesQuery`
-  * `GetProviderModelsQuery`
-  * `GetModelsByProfileIdQuery`
-  * `GetActiveProfileCapabilitiesQuery`
+The `CoreBus` is the central nervous system of the Arena framework. All UI intents must pass through this bus as either Commands or Queries. Direct service injection from the UI to the Core is strictly prohibited.
 
-### 8.2. AI Adapters
-* **`GoogleGeminiAdapter`:** Native adapter supporting `generativelanguage.googleapis.com` models. Fully supports Streaming, Tools, Vision, and JSON Mode.
+### 5.1 CoreBus API
+~~~typescript
+class CoreBus {
+  /**
+   * Dispatches a Command or Query and returns the typed promise/result.
+   */
+  public dispatch<T>(message: ICommand | IQuery): Promise<T>;
+
+  /**
+   * Registers a global middleware interceptor for security, logging, or transformation.
+   */
+  public useMiddleware(middleware: MiddlewareFn): void;
+
+  /**
+   * Binds a Command or Query class to its corresponding handler.
+   * Typically used during the boot sequence by system plugins.
+   */
+  public registerHandler(MessageClass: any, HandlerClass: any): void;
+}
+~~~
+
+> [!warning] Middleware Execution Order
+> Middlewares are executed in the exact order they are registered. The Security middleware must always be the first registered interceptor in the boot sequence.
 
 ---
 
-## 9. System Error Codes Catalog
+## 6. Plugin & Tool System
 
-> **Note:** Error codes in v1 are string literals. They are scheduled to be refactored into a centralized `FrameworkErrorCode` enum/const object in v2.
+The Arena framework is designed to be highly extensible. Features are packaged as plugins that register their own Commands, Queries, and AI Tools.
 
-The Core enforces strict fault isolation. The UI layer must anticipate and gracefully handle the following error strings:
+### 6.1 Built-in Plugins
+* **SystemAiProfilePlugin:** Registers `AddAiProfileCommand`, `UpdateAiProfileCommand`, `GetAiProfilesQuery`, etc., and manages the foundational AI state.
 
-| Error Code | Source / Thrown By | Description |
-| :--- | :--- | :--- |
-| `VAULT_EXISTS` | `SecurityService.setupVault` | Attempted to initialize a vault when one is already provisioned on the device. |
-| `WEAK_PASSWORD` | `SecurityService.setupVault` | The provided master password fails minimum entropy requirements. |
-| `NOT_BOOTED` | `SecurityService.setupVault` | Attempted to execute vault operations before the core engine completed its boot sequence. |
-| `VAULT_MISSING` | `SecurityService.unlockVault` | Attempted to decrypt a vault that does not exist on the current device. |
-| `AI_PROFILE_NOT_FOUND` | `AiGatewayService.prepareSecureContext` | The requested AI profile identity could not be located inside the decrypted vault. |
-| `HANDLER_NOT_FOUND` | `CoreBus.dispatch` | No corresponding command or query handler is registered in the CQRS pipeline. |
-| `ADAPTER_NOT_FOUND` | `AiRegistryService` | The AI provider adapter specified in the profile is not registered in the system. |
-| `INVALID_APP_IDENTITY` | Boot Sequence | The core failed to verify the application's unique signature during bootstrap. |
-| `IMPORT_PARSE_ERROR` | `SystemPortabilityService.importEcosystem` | The imported ecosystem payload is structurally invalid or unreadable. |
-| `IMPORT_DOS_RISK` | `SystemPortabilityService.importEcosystem` | The import payload exceeds the absolute maximum threshold of 50,000 records. |
-| `FACTORY_RESET_FAILED` | `SystemPortabilityService.factoryReset` | The destructive reset process encountered an I/O lock or critical failure. |
-| `STREAM_BODY_MISSING` | `GoogleGeminiAdapter` | The AI provider's underlying network stream was absent or malformed. |
-| `AGENT_EMPTY_RESPONSE` | `AgentExecutorService.executeTask` | The autonomous agent loop returned an empty or structurally invalid conclusion. |
+### 6.2 AiToolRegistryService
+The centralized registry where local backend capabilities are exposed as executable tools for the AI agentic loops.
+
+~~~typescript
+type ToolHandler = (args: Record<string, any>) => Promise<any>;
+
+class AiToolRegistryService {
+  /**
+   * Registers a new capability that can be dynamically exposed to the active AI adapter.
+   */
+  public registerTool(definition: AiToolDto, handler: ToolHandler): void;
+
+  /**
+   * Retrieves all currently registered tools formatted for AI capability injection.
+   */
+  public getRegisteredTools(): AiToolDto[];
+}
+~~~
+
+---
+
+## 7. Core Storage, Security & Portability
+
+The Arena framework operates strictly on a Zero-Knowledge local storage architecture. The UI has absolutely no direct access to unencrypted payloads or cryptographic keys.
+
+### 7.1 SecurityService
+Manages the encryption vault and exposes reactive signals for the UI to monitor authentication states.
+
+~~~typescript
+class SecurityService {
+  // Reactive state signals for UI binding
+  public readonly isVaultUnlocked: Signal<boolean>;
+  public readonly isVaultConfigured: Signal<boolean>;
+
+  /**
+   * Attempts to unlock the local vault.
+   * Returns true if successful, false if the password is incorrect.
+   */
+  public unlockVault(password: string): Promise<boolean>;
+
+  /**
+   * Immediately locks the vault and flushes decrypted keys from memory.
+   */
+  public lockVault(): void;
+
+  /**
+   * Permanently destroys the vault and all cryptographic material.
+   * Requires extreme caution.
+   */
+  public destroyVault(): Promise<void>;
+}
+~~~
+
+> [!warning] Security Architecture
+> The `getSessionKey` method is strictly internal to the Core Engine and is not exposed to the UI layer to maintain the Zero-Knowledge paradigm.
+
+### 7.2 SystemPortabilityService
+Handles the import, export, and lifecycle resets of the local ecosystem.
+
+~~~typescript
+class SystemPortabilityService {
+  /**
+   * Exports the entire configured ecosystem (excluding sensitive vault data) as a serialized string.
+   */
+  public exportEcosystem(): Promise<string>;
+
+  /**
+   * Performs a soft reset, clearing active sessions but retaining the vault and profiles.
+   */
+  public softReset(): Promise<void>;
+  
+  /**
+   * Performs a complete factory reset, destroying all local data.
+   */
+  public factoryReset(): Promise<void>;
+}
+~~~
+
+---
+
+## 8. Connection & Telemetry
+
+### 8.1 AiConnectionMonitorService
+Monitors the real-time health and latency of the active AI provider connections.
+
+~~~typescript
+class AiConnectionMonitorService {
+  /**
+   * Emits the current connection health status of the active AI adapter.
+   */
+  public connectionStatus$: Observable<'connected' | 'disconnected' | 'degraded'>;
+
+  /**
+   * Emits the latency in milliseconds for the last API ping.
+   */
+  public latency$: Observable<number>;
+}
+~~~
+
+---
+
+## 9. Framework Error Codes Catalog
+
+When a Command or Query fails, it rejects with a specific string literal error code. The dumb client UI must match these exact codes to present localized error messages.
+
+| Error Code               | Thrown By                                                                     | Cause / Meaning                                                     |
+| :----------------------- | :---------------------------------------------------------------------------- | :------------------------------------------------------------------ |
+| `VAULT_LOCKED`           | Almost all Commands & Queries                                                 | The operation requires the local vault to be unlocked first.        |
+| `AI_PROFILE_NOT_FOUND`   | `UpdateAiProfileCommand`, `SetActiveProfileCommand`, `DeleteAiProfileCommand` | The requested profile ID does not exist in the local store.         |
+| `INVALID_API_KEY`        | `AddAiProfileCommand`, `UpdateAiProfileCommand`                               | The provided API key format is invalid or rejected by the provider. |
+| `DUPLICATE_PROFILE_NAME` | `AddAiProfileCommand`                                                         | A profile with this exact name already exists.                      |
+| `AI_AUTH_FAILED`         | `AiGatewayService`                                                            | The AI provider rejected the request due to invalid credentials.    |
