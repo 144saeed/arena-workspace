@@ -64,13 +64,23 @@ Pure presentational components. No services allowed.
 ---
 
 ## 4. Execution Flow (Step-by-Step Data Journey)
+Trace the path of data and user interaction, ensuring you document not only the happy path, but also the critical error and security interruption paths.
 
-Trace the path of data and user interaction for the primary happy path.
-
+### 4.1. The Happy Path (Success)
 1. **User Action:** [e.g., User clicks the "Submit" button on `Org-SetupForm`.]
 2. **Event Emission:** [e.g., `Org-SetupForm` emits `(formSubmitted)="payload"`.]
 3. **Orchestration:** [e.g., `UiOrchestratorService` catches the event, tells `AppStateService` to set `isLoading(true)`.]
 4. **Bridge Execution:** [e.g., `CoreBridgeService` dispatches the command to `CoreBus`.]
 5. **State Update:** [e.g., Upon success, `AppStateService` updates the signals, UI re-renders automatically.]
 6. **Visual Resolution:** [e.g., `UiOrchestratorService` closes the overlay.]
+
+### 4.2. The Error Path (Framework Rejection)
+- **Trigger:** [e.g., `CoreBus` throws `FrameworkError` with code `AI_NETWORK_ERROR`.]
+- **Orchestration Catch:** [e.g., `UiOrchestratorService` intercepts the error.]
+- **Visual Fallback:** [e.g., Signals `AppStateService` to set `isLoading(false)` and triggers `OverlayManagerService.showToast('Network error')`.]
+
+### 4.3. The Security Path (Vault Lock Interruption)
+- **Trigger:** [e.g., `SecurityService.isVaultUnlocked` signal evaluates to `false` mid-execution.]
+- **Immediate Purge:** [e.g., `AppStateService` immediately zeroes out the `featureData` signal.]
+- **Redirection:** [e.g., `UiOrchestratorService` forces router navigation to `/unlock` safely.]
 

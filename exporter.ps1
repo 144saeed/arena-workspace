@@ -25,7 +25,7 @@ Get-ChildItem -Path $rootPath -Recurse -Include $extensions |
         try {
             $content = Get-Content $path -Raw -Encoding UTF8
             # ساختار نهایی متن: نام فایل + محتوا + جداکننده
-            "Relative Path: $($path.Replace($rootPath, ''))`n$content`n$('-'*30)" 
+            "`n$('='*40) Relative Path: $($path.Replace($rootPath, ''))`n$('='*40)`n$content" 
         } catch {
             Write-Host "Warning: Could not read $path" -ForegroundColor Yellow
         }

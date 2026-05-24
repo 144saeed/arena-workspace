@@ -94,8 +94,41 @@ A "Feature" in this architecture is a strictly isolated domain of functionality 
 ### 3.2. Extending Core Capabilities (Plugins & Handlers)
 When a UI feature requires a new backend capability (e.g., a new database table, a new AI skill, or a custom command), the UI developer MUST NOT implement this logic in the frontend services. Instead, they must author a Core Plugin.
 - **The AppPlugin Contract:** The developer creates a class implementing `IAppPlugin`. This plugin bundles specific `QueryHandlers`, `CommandHandlers`, and Database Schemas required by the feature.
-- **The Boot Injection:** These feature-specific plugins are collected at the application level and injected into the Core exactly once during the `CoreEngine.boot(plugins)` sequence in the main `app.config.ts`.
+- **The Boot Injection:** These feature-specific plugins are collected at the application level and injected into the Core exactly once during the `CoreEngine.boot(plugins)` sequence.
 - **Execution:** Once booted, the UI components simply dispatch commands to the `CoreBus`, entirely unaware that the handler was injected by their own application's boot sequence.
+
+#### 3.2.1. Application Bootstrap Example (`app.config.ts`)
+To successfully initialize the Core Engine and inject custom plugins, the consumer application MUST configure the `provideArenaCore` provider in its root bootstrap file. This strictly enforces the `AppIdentity` and registers all required AI adapters and feature plugins before the UI renders.
+
+~~~typescript
+import { ApplicationConfig } from '@angular/core';
+import { provideRouter } from '@angular/router';
+import { provideArenaCore, GoogleGeminiAdapter } from 'arena-core';
+
+// Example: Importing a custom plugin created for a specific feature
+import { VaultManagementPlugin } from './features/vault-management/plugins/vault-management.plugin';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter([]),
+    
+    // Bootstrapping the Local Server Environment
+    provideArenaCore({
+      identity: {
+        developerId: 'acme-corp',
+        appName: 'arena-playground',
+        version: 'v1'
+      },
+      adapters: [
+        GoogleGeminiAdapter // Registering the built-in AI Adapter
+      ],
+      plugins: [
+        new VaultManagementPlugin() // Injecting the custom feature plugin
+      ]
+    })
+  ]
+};
+~~~
 
 ### 3.3. Feature Lifecycle & Garbage Collection
 Features are strictly ephemeral.
