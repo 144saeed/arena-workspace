@@ -3,6 +3,21 @@
 > [!warning] Architecture Notice
 > Note: Error codes in v1 are string literals. They are scheduled to be refactored into a centralized FrameworkErrorCode enum/const object in v2.
 
+## 0. Initialization & Boot Sequence
+
+The core framework is strictly instantiated via the `provideArenaCore` provider function during the application's bootstrap phase. Under the Zero-Knowledge paradigm, the UI acts solely as a configuration proxy, passing the required initialization parameters to awaken the Local Backend Server.
+
+### `provideArenaCore(config: ArenaCoreConfig)`
+
+This function registers the `CoreEngineService` and initializes the CQRS bus. 
+
+**Payload Structure (`ArenaCoreConfig`):**
+* `identity`: Defines the current user or workspace identity context.
+* `adapters`: Connects external infrastructure (e.g., `GoogleGeminiAdapter` for AI processing, or storage adapters) to the core system.
+* `plugins`: Registers domain-specific capabilities into the system. For example, injecting `SystemAiProfilePlugin` registers its respective Commands and Queries into the framework's internal execution bus.
+
+> [!important] Architecture Boundary
+> Once `provideArenaCore` is executed, the UI must strictly communicate with the Core via exported Queries and Commands. Direct access to initialized internal services is physically blocked.
 ## 1. Core Commands (ICommand)
 
 Commands represent intent to change the state of the Local Backend Server. All commands are dispatched via the `CoreBus` and process asynchronously.
@@ -264,7 +279,25 @@ export class AiGatewayService {
 ```
 **Execution Notes:** If `profileId` is omitted, the service defaults to the globally active profile. `abortSignal` can be used to terminate ongoing streams or requests.
 
-### 4.2 AgentExecutorService
+### 4.2 `AgentExecutorService`
+
+The `AgentExecutorService` bridges the gap between the UI client and the internal AI capabilities. It exposes distinct execution pathways depending on the desired interaction model, abstracting away the underlying adapter complexities (such as the `GoogleGeminiAdapter`).
+
+**Method Signatures:**
+
+* `executeTask<T>(command: ICommand): Promise<T>`
+    Executes a single, complete, one-off AI task. 
+    * **Behavior:** Returns a standard `Promise` that resolves to the precise Expected Return DTO defined by the command's query handler. 
+    * **Use Case:** Best suited for background processing, categorization, or non-streaming single-shot requests.
+
+* `executeStreamTask(command: ICommand): Observable<AiEventDto>`
+    Initializes a persistent, streaming connection for real-time AI interactions. 
+    * **Behavior:** Returns an `Observable` that sequentially emits strictly typed `AiEventDto` structures as the stream progresses from the `AiGatewayService`.
+    * **Use Case:** Mandatory for live chat interfaces, real-time typing indicators, or any UI requiring progressive chunk rendering.
+
+> [!warning] Error Handling Note
+> Note: Error codes in v1 (such as `AI_AUTH_FAILED` or `STREAM_ABORTED`) are string literals. They are scheduled to be refactored into a centralized `FrameworkErrorCode` enum/const object in v2. Ensure your UI logic accounts for string-based error matching.
+
 Manages the autonomous agentic loop. Evaluates tool calls, executes them locally, and iterates.
 
 ```typescript
@@ -285,6 +318,7 @@ export class AgentExecutorService {
 }
 ```
 
+
 ### 4.3 SystemMonitorService
 Provides reactive monitoring for the overall local framework ecosystem and engine status.
 
@@ -294,6 +328,15 @@ export class SystemMonitorService {
   public readonly latestError: Signal<string | null>;
 }
 ```
+
+### 4.4 `PublicDataStoreService`
+
+In strict adherence to the Zero-Knowledge principle, the UI client must never directly interact with the system `Vault`, `CryptoService`, or the internal `SchemaManager`. The `PublicDataStoreService` is exported as the exclusive, authorized gateway for the UI to manage its own isolated local data tables.
+
+**Capabilities:**
+* Provides isolated Read/Write access to UI-specific data stores within the local Dexie database.
+* Strictly enforces the boundary between public application data and securely encrypted internal system tables.
+* Operations performed through this service bypass the encrypted infrastructure, ensuring fast access to non-sensitive frontend UI state or cache.
 
 ---
 
