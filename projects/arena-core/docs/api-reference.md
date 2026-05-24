@@ -23,7 +23,7 @@ export class AddAiProfileCommand implements ICommand {
 }
 ~~~
 * **Security & Constraints:** Requires an unlocked vault state.
-* **Potential Error Codes:** `VAULT_LOCKED`, `INVALID_API_KEY`, `DUPLICATE_PROFILE_NAME`
+* **Potential Error Codes:** `VAULT_LOCKED`, `INVALID_API_KEY`
 
 ### 1.2 UpdateAiProfileCommand
 Modifies an existing AI provider profile configuration.
@@ -39,7 +39,7 @@ export class UpdateAiProfileCommand implements ICommand {
 }
 ~~~
 * **Security & Constraints:** Requires an unlocked vault state.
-* **Potential Error Codes:** `VAULT_LOCKED`, `AI_PROFILE_NOT_FOUND`, `INVALID_API_KEY`
+* **Potential Error Codes:** `VAULT_LOCKED`, `PROFILE_NOT_FOUND`, `INVALID_API_KEY`
 
 ### 1.3 SetActiveProfileCommand
 Sets a specific AI profile as the globally active provider for immediate dispatch and agentic execution.
@@ -52,7 +52,7 @@ export class SetActiveProfileCommand implements ICommand {
 }
 ~~~
 * **Security & Constraints:** Requires an unlocked vault state.
-* **Potential Error Codes:** `VAULT_LOCKED`, `AI_PROFILE_NOT_FOUND`
+* **Potential Error Codes:** `VAULT_LOCKED`, `PROFILE_NOT_FOUND`
 
 ### 1.4 DeleteAiProfileCommand
 Permanently deletes an AI profile configuration from the local backend store.
@@ -65,7 +65,7 @@ export class DeleteAiProfileCommand implements ICommand {
 }
 ~~~
 * **Security & Constraints:** Requires an unlocked vault state.
-* **Potential Error Codes:** `VAULT_LOCKED`, `AI_PROFILE_NOT_FOUND`
+* **Potential Error Codes:** `VAULT_LOCKED`, `PROFILE_NOT_FOUND`
 
 ---
 
@@ -85,12 +85,15 @@ Retrieves a list of available models for a specific provider.
 * **Payload Structure:**
 ~~~typescript
 export class GetProviderModelsQuery implements IQuery {
-  constructor(public readonly providerId: string) {}
+  constructor(
+    public readonly providerId: string,
+    public readonly rawApiKey: string
+  ) {}
 }
 ~~~
 * **Return Type:** `Promise<string[]>`
-* **Security & Constraints:** Requires an unlocked vault.
-* **Potential Error Codes:** `VAULT_LOCKED`
+* **Security & Constraints:** Designed for pre-flight testing. Bypasses the vault constraint to test keys before saving.
+* **Potential Error Codes:** `INVALID_API_KEY`
 
 ### 2.3 GetModelsByProfileIdQuery
 Retrieves a list of available models based on an existing profile's configuration.
@@ -102,14 +105,14 @@ export class GetModelsByProfileIdQuery implements IQuery {
 ~~~
 * **Return Type:** `Promise<string[]>`
 * **Security & Constraints:** Requires an unlocked vault.
-* **Potential Error Codes:** `VAULT_LOCKED`, `AI_PROFILE_NOT_FOUND`
+* **Potential Error Codes:** `VAULT_LOCKED`, `PROFILE_NOT_FOUND`, `INVALID_API_KEY`
 
 ### 2.4 GetActiveProfileCapabilitiesQuery
 Retrieves the capability matrix for the currently active AI profile.
 * **Payload Structure:** Empty constructor.
-* **Return Type:** `Promise<AiCapabilitiesDto>`
+* **Return Type:** `Promise<AiCapabilitiesDto | undefined>`
 * **Security & Constraints:** Requires an unlocked vault.
-* **Potential Error Codes:** `VAULT_LOCKED`, `AI_PROFILE_NOT_FOUND`
+* **Potential Error Codes:** `VAULT_LOCKED`
 
 ---
 
@@ -139,6 +142,7 @@ export interface AiRequestDto {
   readonly temperature?: number;
   readonly maxOutputTokens?: number;
   readonly model?: string;
+  readonly expectJson?: boolean;
 }
 ~~~
 
@@ -146,13 +150,10 @@ export interface AiRequestDto {
 The absolute final response state emitted upon completion of a non-streaming AI process.
 ~~~typescript
 export interface AiResponseDto {
-  readonly message: AiMessageDto;
-  readonly usage: {
-    readonly promptTokens: number;
-    readonly completionTokens: number;
-    readonly totalTokens: number;
-  };
-  readonly terminationReason: 'stop' | 'length' | 'tool_calls' | 'content_filter';
+  readonly content: string;
+  readonly tokensUsed?: number;
+  readonly providerId: string;
+  readonly toolCalls?: AiToolCallDto[];
 }
 ~~~
 
@@ -166,10 +167,11 @@ export interface AiMessageDto {
 ~~~
 
 ### 3.5 AiMessagePartDto
-A discriminated union defining a text fragment, an incoming tool call request, or an executed tool result.
+A discriminated union defining a text fragment, an image element, an incoming tool call request, or an executed tool result.
 ~~~typescript
 export type AiMessagePartDto =
   | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly imageUrl: string }
   | { readonly type: 'tool-call'; readonly toolCall: AiToolCallDto }
   | { readonly type: 'tool-result'; readonly toolCallId: string; readonly toolCallName: string; readonly toolResult: any };
 ~~~
@@ -195,11 +197,13 @@ export interface AiToolCallDto {
 ~~~
 
 ### 3.8 StructuredToolResultDto
-A discriminated union containing the localized operational output or error state of an executed tool.
+Contains the localized operational output or error state of an executed tool.
 ~~~typescript
-export type StructuredToolResultDto =
-  | { readonly status: 'success'; readonly data: any }
-  | { readonly status: 'fatal_error'; readonly errorMessage: string };
+export interface StructuredToolResultDto {
+  readonly status: 'success' | 'retryable_error' | 'fatal_error';
+  readonly data?: any;
+  readonly errorMessage?: string;
+}
 ~~~
 
 ### 3.9 AiCapabilitiesDto
@@ -208,20 +212,22 @@ A capability matrix declaring what features the active backend adapter safely su
 export interface AiCapabilitiesDto {
   readonly supportsStreaming: boolean;
   readonly supportsTools: boolean;
-  readonly supportsSystemInstruction: boolean;
-  readonly maxContextWindow: number;
+  readonly supportsVision: boolean;
+  readonly supportsJsonMode: boolean;
 }
 ~~~
 
 ### 3.10 AiEventDto
 Represents real-time incremental tokens, intermediary tool execution updates, or complete response objects emitted inside AI live streams.
 ~~~typescript
+export type AiEventType = 'chunk' | 'tool-call' | 'complete' | 'error';
+
 export interface AiEventDto {
-  readonly type: 'token' | 'tool-call' | 'complete' | 'error';
-  readonly text?: string;
-  readonly toolCall?: AiToolCallDto;
-  readonly response?: AiResponseDto;
+  readonly type: AiEventType;
+  readonly content?: string;
+  readonly toolCalls?: AiToolCallDto[];
   readonly error?: string;
+  readonly tokensUsed?: number;
 }
 ~~~
 
@@ -277,7 +283,8 @@ Provides reactive monitoring for the overall local framework ecosystem and engin
 
 ~~~typescript
 export class SystemMonitorService {
-  public getSystemState(): Observable<any>;
+  public readonly isProcessing: Signal<boolean>;
+  public readonly latestError: Signal<string | null>;
 }
 ~~~
 
@@ -348,12 +355,14 @@ export class SecurityService {
 
   /**
    * Creates a new master vault.
+   * Potential Error Codes: `VAULT_EXISTS`, `NOT_BOOTED`, `WEAK_PASSWORD`
    */
   public setupVault(password: string): Promise<void>;
 
   /**
    * Attempts to unlock the local vault.
    * Returns true if successful, false if the password is incorrect.
+   * Potential Error Codes: `VAULT_MISSING`
    */
   public unlockVault(password: string): Promise<boolean>;
 
@@ -370,8 +379,10 @@ export class SecurityService {
 }
 ~~~
 
-> [!warning] Security Architecture
-> The `getSessionKey` method is strictly internal to the Core Engine and is not exposed to the UI layer to maintain the Zero-Knowledge paradigm.
+> [!danger] Internal API Warning
+> The `initializeState` method is strictly for the internal CoreEngine boot sequence. UI developers MUST NOT call this method manually.
+> 
+> Furthermore, the internal `getSessionKey` method is not exposed to the UI layer to maintain the Zero-Knowledge paradigm.
 
 ### 7.2 SystemPortabilityService
 Handles the import, export, and lifecycle resets of the local ecosystem.
@@ -379,7 +390,8 @@ Handles the import, export, and lifecycle resets of the local ecosystem.
 ~~~typescript
 export class SystemPortabilityService {
   /**
-   * Exports the entire configured ecosystem (excluding sensitive vault data) as a serialized string.
+   * Exports the configured ecosystem as a serialized string.
+   * Note: System tables (including AI Profiles and the Vault) are strictly excluded from this export.
    */
   public exportEcosystem(): Promise<string>;
 
@@ -389,12 +401,13 @@ export class SystemPortabilityService {
   public importEcosystem(jsonString: string): Promise<void>;
 
   /**
-   * Performs a soft reset, clearing active sessions but retaining the vault and profiles.
+   * Performs a soft reset. Clears all non-system tables.
    */
   public softReset(): Promise<void>;
   
   /**
    * Performs a complete factory reset, destroying all local data.
+   * Warning: Triggers an immediate `window.location.reload()` upon completion.
    */
   public factoryReset(): Promise<void>;
 }
